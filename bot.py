@@ -684,7 +684,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(guide_callback, pattern="^guide_"))
 
 
-    app.add_handler(CommandHandler("reset", reset))
+
     # ---------------- ChatMember Handler (bot added to group) ----------------
     app.add_handler(ChatMemberHandler(bot_added, ChatMemberHandler.MY_CHAT_MEMBER))
 
