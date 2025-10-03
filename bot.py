@@ -9,6 +9,7 @@ from telegram.ext import (
 from config import BOT_TOKEN, OWNER_ID, DB_PATH
 
 
+
 # Log channel/group for new users/groups
 LOG_CHAT_ID = -1002962367553 # Replace with your group ID
 
@@ -355,9 +356,68 @@ async def getid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file_id = reply.video.file_id
     await update.message.reply_text(f"✅ Video file_id:\n<code>{file_id}</code>", parse_mode="HTML")
-# ---------------- /broad COMMAND ----------------
-from telegram import Message
+from telegram import Message, Update
 from telegram.ext import ContextTypes
+import sqlite3
+import asyncio
+from functools import partial
+import logging
+
+# Set up logging for debugging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+async def fetch_ids():
+    """Fetch group and user IDs in a separate thread."""
+    loop = asyncio.get_event_loop()
+    def get_ids():
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT group_id FROM groups")
+            groups = [row[0] for row in c.fetchall()]
+            c.execute("SELECT user_id FROM users")
+            users = [row[0] for row in c.fetchall()]
+            conn.close()
+            return groups, users
+        except Exception as e:
+            logger.error(f"Error fetching IDs: {e}")
+            return [], []
+    return await loop.run_in_executor(None, get_ids)
+
+async def broadcast_task(bot, reply: Message, groups: list, users: list):
+    """Background broadcast fully detached from update"""
+    success_groups = 0
+    success_users = 0
+
+    # Broadcast to groups
+    for gid in groups:
+        try:
+            await reply.forward(chat_id=gid)
+            success_groups += 1
+            await asyncio.sleep(0)  # yield control
+        except Exception:
+            continue
+
+    # Broadcast to users
+    for uid in users:
+        try:
+            await reply.forward(chat_id=uid)
+            success_users += 1
+            await asyncio.sleep(0)  # yield control
+        except Exception:
+            continue
+
+    # Log result to owner
+    try:
+        await bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"✅ Broadcast done!\nGroups: {success_groups}/{len(groups)}\nUsers: {success_users}/{len(users)}"
+        )
+    except Exception:
+        pass
+
+
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Broadcast a replied message to all users and groups (OWNER ONLY)"""
@@ -365,51 +425,28 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id != OWNER_ID:
         await update.message.reply_text("❌ You are not authorized to use this command.")
         return
-
     reply: Message = update.message.reply_to_message
     if not reply:
         await update.message.reply_text("❌ Reply to a message to broadcast it.")
         return
 
     # Confirm broadcast start
-    await update.message.reply_text("🚀 Broadcasting message to all users and groups...")
+    try:
+        await update.message.reply_text("🚀 Broadcasting message to all users and groups...")
+    except Exception as e:
+        logger.error(f"Failed to send broadcast start message: {e}")
+        return
 
-    # ---------------- Fetch all groups and users ----------------
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    # Fetch IDs in a separate thread
+    try:
+        groups, users = await fetch_ids()
+    except Exception as e:
+        logger.error(f"Failed to fetch IDs: {e}")
+        await update.message.reply_text("❌ Failed to fetch recipients. Try again later.")
+        return
 
-    c.execute("SELECT group_id FROM groups")
-    groups = [row[0] for row in c.fetchall()]
-
-    c.execute("SELECT user_id FROM users")
-    users = [row[0] for row in c.fetchall()]
-
-    conn.close()
-
-    # ---------------- Forward to groups ----------------
-    success_groups = 0
-    for gid in groups:
-        try:
-            await reply.forward(chat_id=gid)
-            success_groups += 1
-        except:
-            continue
-
-    # ---------------- Forward to users ----------------
-    success_users = 0
-    for uid in users:
-        try:
-            await reply.forward(chat_id=uid)
-            success_users += 1
-        except:
-            continue
-
-    # Summary message
-    await update.message.reply_text(
-        f"✅ Broadcast completed!\n\n"
-        f"Groups: {success_groups}/{len(groups)}\n"
-        f"Users: {success_users}/{len(users)}"
-    )
+    # Run broadcast in background
+    asyncio.create_task(broadcast_task(reply, groups, users, update, context))
 import os
 import shutil
 import datetime
@@ -482,7 +519,6 @@ from telegram.ext import ContextTypes, CallbackQueryHandler, CommandHandler
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import ContextTypes
 
-# ---------------- Guide Texts ----------------
 GUIDE_TEXTS = {
     "commands": (
         "📜 <b>Commands:</b>\n"
@@ -526,15 +562,14 @@ GUIDE_TEXTS = {
     ),
     "elimination": (
         "☠️ <b>Elimination Rules:</b>\n"
-        "1️⃣ <b>After 1 player is out:</b>\n"
-        "   • Duplicate numbers are no longer allowed.\n"
-        "   • Each duplicate number chosen by a player = −1 point.\n"
-        "   • Players who pick a unique number remain safe.\n\n"
+        "1️⃣ <b>Duplicate Penalty Rule (activates after 4+ players pick the same number or first elimination):</b>\n"
+        "   • When active, if 4 or more players pick the same number, each gets −1 point.\n"
+        "   • Players with unique numbers or numbers picked by fewer than 4 players are safe.\n\n"
         "2️⃣ <b>After 2 players are out:</b>\n"
         "   • If a player picks the <b>exact target number</b>, all other players lose −2 points.\n\n"
         "3️⃣ <b>After 3 players are out:</b>\n"
         "   • If one player picks 0 and another picks 100 in the same round, the player who picked 100 wins automatically.\n\n"
-        "💡 <i>Tip:</i> Be careful with duplicates and extreme numbers after eliminations—they can heavily affect your score!"
+        "💡 <i>Tip:</i> Watch for duplicate numbers after the rule activates, and avoid extreme numbers in late rounds to stay safe!"
     ),
     "advice": (
         "💡 <b>General Advice:</b>\n\n"
@@ -619,6 +654,9 @@ async def bugs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 from telegram.ext import ApplicationBuilder
 
+
+
+#
 if __name__ == "__main__":
     # Init database
     init_db()
@@ -626,7 +664,13 @@ if __name__ == "__main__":
     # Build app
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # ---------------- Command Handlers ----------------
+  # Add owner handlers in group 0 (default)
+
+    # ---------------- Group 1: Game Handlers ----------------
+    import game
+    game.register_handlers  # Add game handlers in group 1
+
+    # ---------------- Other Command Handlers (Group 0) ----------------
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats_"))
@@ -639,16 +683,17 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("guide", guide_command))
     app.add_handler(CallbackQueryHandler(guide_callback, pattern="^guide_"))
 
-    app.add_handler(CommandHandler("bugs", bugs))
 
+    app.add_handler(CommandHandler("reset", reset))
     # ---------------- ChatMember Handler (bot added to group) ----------------
     app.add_handler(ChatMemberHandler(bot_added, ChatMemberHandler.MY_CHAT_MEMBER))
 
     # ---------------- Background Tasks ----------------
     # Start auto backup loop
     app.job_queue.run_repeating(lambda ctx: asyncio.create_task(auto_backup(app)), interval=12*3600, first=10)
-    # ---------------- Game Handlers ----------------
-    game.register_handlers(app)
+
+    import owner
+    owner.register_owner_handlers
 
     # ---------------- Run ----------------
     print("✅ Bot is running...")
