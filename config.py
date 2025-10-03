@@ -1,10 +1,10 @@
 # config.py
 
 BOT_TOKEN = "8152060344:AAGwGOsRmtawrJm7tovUrxLV8OttSNKKJuY"
-
 # List of Bot Admin IDs
 BOT_ADMINS = [7995262033, 7548555766]  # put your Telegram IDs here
 
+LOG_CHAT_ID = "-1002898222347"
 
 OWNER_ID = 7995262033  
 
