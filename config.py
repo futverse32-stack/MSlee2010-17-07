@@ -1,6 +1,6 @@
 # config.py
 
-BOT_TOKEN = "8152060344:AAGwGOsRmtawrJm7tovUrxLV8OttSNKKJuY"
+BOT_TOKEN = "8199691974:AAGpT3NihuvnFYj9xJ3dcXb_cF2vfpfGDpY"
 # List of Bot Admin IDs
 BOT_ADMINS = [7995262033, 7548555766]  # put your Telegram IDs here
 
