@@ -1,0 +1,22 @@
+# config.py
+
+BOT_TOKEN = "8152060344:AAGwGOsRmtawrJm7tovUrxLV8OttSNKKJuY"
+
+# List of Bot Admin IDs
+BOT_ADMINS = [7995262033, 7548555766]  # put your Telegram IDs here
+
+
+OWNER_ID = 7995262033  
+
+DB_PATH = "mindscale.db"
+
+MIN_PLAYERS = 5
+ROUND_TIME_SEC = 120
+TARGET_PERCENTAGE = 0.8
+
+LOSER_POINT = -1
+ELIMINATION_POINT = -10
+
+RULE_AFTER_1_OUT = True
+RULE_AFTER_2_OUT = True
+RULE_AFTER_3_OUT = True
