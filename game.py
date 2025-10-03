@@ -34,6 +34,8 @@ VIDEO_ELIMINATION = "BAACAgUAAyEFAAS3OY5mAAIG_GjcAQWFyh2q8_qgBCE1qFRiIlLxAAJpHgA
 VIDEO_WINNER = "BAACAgUAAyEFAAS3OY5mAAIG_mjcAQWjT5k0VtEounHroJd-hiHfAAJrHgAC00rhVrBRCwxYF9-UNgQ"              # winner video
 
 
+
+
 # -------------------- DATABASE --------------------
 def init_user_table():
     conn = sqlite3.connect(DB_PATH)
@@ -114,30 +116,29 @@ def update_user_after_game(user_id: int, score_delta: int, won: bool, rounds_pla
     conn.close()
 
 def ensure_columns_exist():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    required_columns = {
-        "games_played": "INTEGER DEFAULT 0",
-        "wins": "INTEGER DEFAULT 0",
-        "losses": "INTEGER DEFAULT 0",
-        "rounds_played": "INTEGER DEFAULT 0",
-        "eliminations": "INTEGER DEFAULT 0",
-        "total_score": "INTEGER DEFAULT 0",
-        "last_score": "INTEGER DEFAULT 0",
-        "penalties": "INTEGER DEFAULT 0"
-    }
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        required_columns = {
+            "games_played": "INTEGER DEFAULT 0",
+            "wins": "INTEGER DEFAULT 0",
+            "losses": "INTEGER DEFAULT 0",
+            "rounds_played": "INTEGER DEFAULT 0",
+            "eliminations": "INTEGER DEFAULT 0",
+            "total_score": "INTEGER DEFAULT 0",
+            "last_score": "INTEGER DEFAULT 0",
+            "penalties": "INTEGER DEFAULT 0"
+        }
 
-    # Get existing columns
-    c.execute("PRAGMA table_info(users)")
-    existing_columns = [col[1] for col in c.fetchall()]
+        c.execute("PRAGMA table_info(users)")
+        existing_columns = [col[1] for col in c.fetchall()]
 
-    # Add missing columns
-    for col, col_type in required_columns.items():
-        if col not in existing_columns:
-            c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+        for col, col_type in required_columns.items():
+            if col not in existing_columns:
+                c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+
 
 # -------------------- GAME DATA CLASSES --------------------
 class Player:
@@ -195,7 +196,6 @@ class MindScaleGame:
 def mention_html(p: Player):
     return f"<a href='tg://user?id={p.user_id}'>{p.name}</a>"
 
-# -------------------- START ROUND (NEX STYLE) --------------------
 async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     if group_id not in active_games:
         return
@@ -212,42 +212,25 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
 
     # Cancel old tasks
     for t in list(game.pick_tasks.values()) + list(game.pick_30_alerts.values()):
-        t.cancel()
+        try:
+            t.cancel()
+        except:
+            pass
     game.pick_tasks.clear()
     game.pick_30_alerts.clear()
 
-    # -------------------- Countdown --------------------
-    try:
-        msg: Message = await context.bot.send_message(
-            chat_id=group_id,
-            text=f" 𝗥𝗼𝘂𝗻𝗱 {game.round_number} \n\n🎲 Begins in 5..."
-        )
-    except:
-        msg = None
+    # -------------------- Announce duplicate rule status --------------------
+    if getattr(game, "duplicate_rule_active", False):
+        try:
+            await context.bot.send_message(
+                chat_id=group_id,
+                text="⚠️ Duplicate penalty rule is active this round! Picking the same number as 3 or more other players will result in a -1 point penalty.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
 
-    async def countdown():
-        for sec in [4, 3, 2, 1]:
-            await asyncio.sleep(1)  # ⏳ backgrounded countdown
-            if msg:
-                try:
-                    await msg.edit_text(
-                        f" 𝗥𝗼𝘂𝗻𝗱 {game.round_number} \n\n🎲 Begins in {sec}..."
-                    )
-                except:
-                    pass
-        await asyncio.sleep(1)
-        if msg:
-            try:
-                await msg.edit_text(
-                    f" �_R𝗼𝘂𝗻𝗱 {game.round_number} \n\n🎲 Starting now! Check your DMs and send a number (0–100)."
-                )
-            except:
-                pass
-
-    # 🔹 Run countdown fully in background so it doesn't block other groups
-    asyncio.create_task(countdown())
-
-    # -------------------- Announcement with Video/Button --------------------
+    # -------------------- Round start announcement --------------------
     bot_username = (await context.bot.get_me()).username or ""
     dm_url = f"https://t.me/{bot_username}"
     buttons = InlineKeyboardMarkup([[InlineKeyboardButton("Send number in DM", url=dm_url)]])
@@ -256,31 +239,39 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
             await context.bot.send_video(
                 chat_id=group_id,
                 video=VIDEO_ROUND_ANNOUNCE,
-                caption=f" 𝗥𝗼𝘂𝗻𝗱 {game.round_number} \n🎲 Send your number in DM!",
+                caption=f"𝗥𝗼𝘂𝗻𝗱 {game.round_number} \n🎲 Starting now! Send your number in DM!",
                 reply_markup=buttons
             )
         else:
             await context.bot.send_message(
                 chat_id=group_id,
-                text=f" 𝗥𝗼𝘂𝗻𝗱 {game.round_number} \n🎲 Send your number in DM!",
+                text=f"𝗥𝗼𝘂𝗻𝗱 {game.round_number} \n🎲 Starting now! Send your number in DM!",
                 reply_markup=buttons
             )
     except:
-        await context.bot.send_message(
-            chat_id=group_id,
-            text=f"𝗥𝗼𝘂𝗻𝗱 {game.round_number} \n🎲 Send your number in DM!",
-            reply_markup=buttons
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=f"𝗥𝗼𝘂𝗻𝗱 {game.round_number} \n🎲 Starting now! Send your number in DM!",
+                reply_markup=buttons
+            )
+        except:
+            pass
 
     # -------------------- Check active players --------------------
     players = game.active_players
     if not players:
-        await context.bot.send_message(chat_id=group_id, text="❌ No active players. Ending game.")
+        try:
+            await context.bot.send_message(chat_id=group_id, text="❌ No active players. Ending game.")
+        except:
+            pass
         await end_game(context, group_id)
         return
 
     # -------------------- Per-player DM and timers --------------------
     async def handle_miss(user_id: int):
+        if group_id not in active_games or user_id not in game.players:
+            return
         p = game.players.get(user_id)
         if not p or p.eliminated or p.current_number is not None:
             return
@@ -315,11 +306,13 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         game.pick_30_alerts.pop(user_id, None)
 
         # Check if round can be processed
-        if all(pl.current_number is not None or pl.eliminated for pl in game.active_players):
+        if group_id in active_games and all(pl.current_number is not None or pl.eliminated for pl in game.active_players):
             game.current_round_active = False
             await process_round_results(context, group_id)
 
     async def send_30_alert(user_id: int):
+        if group_id not in active_games or user_id not in game.players:
+            return
         p = game.players.get(user_id)
         if not p or p.eliminated or p.current_number is not None:
             return
@@ -334,18 +327,23 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
 
     # -------------------- Send DMs and start timers --------------------
     for p in players:
+        if p.eliminated:
+            continue
         # DM instructions
         try:
             await context.bot.send_message(
                 chat_id=p.user_id,
-                text=f"🎯  𝗥𝗼𝘂𝗻𝗱 {game.round_number} \nSend a number between 0–100 (plain message)."
+                text=f"🎯 𝗥𝗼𝘂𝗻𝗱 {game.round_number} \nSend a number between 0–100 ."
             )
         except:
-            await context.bot.send_message(
-                chat_id=group_id,
-                text=f"⚠️ Could not DM {mention_html(p)}. Please open your DM with the bot.",
-                parse_mode="HTML"
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id=group_id,
+                    text=f"⚠️ Could not DM {mention_html(p)}. Please open your DM with the bot.",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
 
         # 30-second alert
         async def _alert(uid=p.user_id):
@@ -360,7 +358,8 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
             await handle_miss(uid)
         t_timeout = asyncio.create_task(_timeout())
         game.pick_tasks[p.user_id] = t_timeout
-        
+
+
 async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     if group_id not in active_games:
         return
@@ -376,7 +375,10 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
              if isinstance(p.current_number, (int, float))]
 
     if not picks:
-        await context.bot.send_message(chat_id=group_id, text="❌ No valid picks received this round.")
+        try:
+            await context.bot.send_message(chat_id=group_id, text="❌ No valid picks received this round.")
+        except:
+            pass
         await end_game(context, group_id)
         return
 
@@ -394,7 +396,9 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
     reveal_text += "▭▭▭▭▭▭▭▭▭▭▭▭▭▭"
     try:
         await context.bot.send_message(chat_id=group_id, text=reveal_text, parse_mode="HTML")
-        await asyncio.sleep(2)  # Await here if you want a blocking delay; otherwise, task it.
+        async def reveal_delay():
+            await asyncio.sleep(2)
+        asyncio.create_task(reveal_delay())
     except:
         pass
 
@@ -402,16 +406,21 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
     num_alive = len(alive_players)
     duplicate_players = set()
     duplicates_exist = False
+    rule_applied = False
 
-    # ✅ Apply duplicates only if more than 2 alive AND at least 1 player has already been eliminated
-    num_eliminated = len([p for p in game.players.values() if p.eliminated])
-    if num_alive > 2 and num_eliminated >= 1:
-        counts = {}
-        for uid, num in picks:
-            counts[num] = counts.get(num, 0) + 1
-        duplicate_nums = {num for num, count in counts.items() if count > 1}
+    # Check for 4 or more players picking the same number to activate rule for next round
+    counts = {}
+    for uid, num in picks:
+        counts[num] = counts.get(num, 0) + 1
+    if any(count >= 4 for count in counts.values()):
+        game.next_round_duplicate_active = True  # Schedule duplicate rule for next round
+
+    # Apply duplicates only if more than 2 alive AND duplicate rule is active
+    if num_alive > 2 and getattr(game, "duplicate_rule_active", False):
+        duplicate_nums = {num for num, count in counts.items() if count >= 4}
         if duplicate_nums:
             duplicates_exist = True
+            rule_applied = True
         for p in game.active_players:
             if p.current_number in duplicate_nums:
                 duplicate_players.add(p)
@@ -450,6 +459,7 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
 
     # -------------------- Second elimination special penalty --------------------
     special_penalty_applied = False
+    num_eliminated = len([p for p in game.players.values() if p.eliminated])
     if num_eliminated >= 2 and not zero_vs_hundred_case and not duplicates_exist:
         exact_target_players = [p for p in alive_players if p.current_number == round(target)]
         if exact_target_players:
@@ -466,7 +476,7 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
             if p in duplicate_players:
                 continue  # duplicates already penalized
             if p not in winner_players:
-                # ✅ Skip non-winner penalty if player already got -2 (timeout)
+                # Skip non-winner penalty if player already got -2 (timeout)
                 if getattr(p, "timeout_penalty_applied", False):
                     continue
                 if duplicates_exist:
@@ -483,6 +493,9 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
         if not p.eliminated and p.score <= -10:
             p.eliminated = True
             eliminated_now.append(p)
+    # Activate duplicate rule for next round if first elimination occurs
+    if eliminated_now and num_eliminated == 0:
+        game.next_round_duplicate_active = True
 
     # -------------------- Round Results Announcement --------------------
     res = f"𝗥𝗼𝘂𝗻𝗱 {game.round_number} 𝗥𝗲𝘀𝘂𝗹𝘁𝘀 \n\n"
@@ -501,7 +514,9 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
     res += " Keep pushing, the next round awaits! 🚀"
     try:
         await context.bot.send_message(chat_id=group_id, text=res, parse_mode="HTML")
-        await asyncio.sleep(5)
+        async def results_delay():
+            await asyncio.sleep(5)
+        asyncio.create_task(results_delay())
     except:
         pass
 
@@ -528,13 +543,20 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
     game.round_results_sent = False
     game.reset_round_picks()
     for task in list(game.pick_tasks.values()) + list(game.pick_30_alerts.values()):
-        task.cancel()
+        try:
+            task.cancel()
+        except:
+            pass
     game.pick_tasks.clear()
     game.pick_30_alerts.clear()
 
+    # Update duplicate rule for next round
+    game.duplicate_rule_active = getattr(game, "next_round_duplicate_active", False)
+    game.next_round_duplicate_active = False  # Reset for the next round
+
     # Start next round (already backgrounded)
     asyncio.create_task(start_round(context, group_id))
-# -------------------- DM PICK HANDLER --------------------
+
 async def dm_pick_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles private number submissions (0-100) for active game rounds.
@@ -607,10 +629,20 @@ async def dm_pick_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     player.current_number = num
 
     # --- NEW: send DM reply with a button to go back to the group ---
+    group_link = None
     try:
-        group_link = f"https://t.me/c/{str(group_id)[4:]}"
+        # Fetch chat information to determine if it's a public or private group
+        chat = await context.bot.get_chat(group_id)
+        if getattr(chat, "username", None):  # Public group or supergroup with username
+            group_link = f"https://t.me/{chat.username}"
+        else:  # Private group or supergroup
+            # Convert group_id to Telegram link format (remove -100 prefix)
+            chat_id_str = str(group_id)
+            if chat_id_str.startswith("-100"):
+                group_link = f"https://t.me/c/{chat_id_str[4:]}"
     except Exception:
-        group_link = None
+        # Fallback if chat info cannot be retrieved
+        pass
 
     if group_link:
         keyboard = InlineKeyboardMarkup(
@@ -623,7 +655,7 @@ async def dm_pick_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard
         )
     else:
-        # fallback if something odd with group_id
+        # Fallback if group link cannot be generated
         await update.message.reply_text(
             f"♦ Number received: <b>{num}</b>\n"
             "🎯 Get ready for the next round!",
@@ -654,7 +686,6 @@ async def dm_pick_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Process round results immediately
         await process_round_results(context, group_id)
 
-# -------------------- END GAME --------------------
 async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     """
     Finalize the match: send final scoreboard in Nex-style, announce winner,
@@ -670,16 +701,23 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     game.ended = True
 
     # -------------------- Final Scoreboard (Nex Style) --------------------
-    players_sorted = sorted(game.players.values(), key=lambda p: -getattr(p, "score", 0))
+    players_sorted = sorted(
+        game.players.values(),
+        key=lambda p: -getattr(p, "score", 0)
+    ) if hasattr(game, "players") else []
+
     text = "『 𝗙𝗶𝗻𝗮𝗹 𝗦𝗰𝗼𝗿𝗲𝗰𝗮𝗿𝗱 』\n"
     text += "🎖️ Top Scorers:\n"
 
-    for p in players_sorted:
-        name = getattr(p, "name", "Unknown")
-        user_id = getattr(p, "user_id", None)
-        score = getattr(p, "score", 0)
-        status = " (Out)" if getattr(p, "eliminated", False) else ""
-        text += f"♦️  <a href='tg://user?id={user_id}'>{name}</a> — {score}  {status}\n"
+    if not players_sorted:
+        text += "No players participated.\n"
+    else:
+        for p in players_sorted:
+            name = getattr(p, "name", "Unknown")
+            user_id = getattr(p, "user_id", None)
+            score = getattr(p, "score", 0)
+            status = " (Out)" if getattr(p, "eliminated", False) else ""
+            text += f"♦️  <a href='tg://user?id={user_id}'>{name}</a> — {score}  {status}\n"
 
     text += "\n⊱⋅ ──────────────── ⋅⊰\n\n"
 
@@ -692,23 +730,32 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         winner_id = getattr(winner, "user_id", None)
         text += f"🎉 Champion: <a href='tg://user?id={winner_id}'>{winner_name}</a> 🏆\n"
 
-    # -------------------- Send Scorecard --------------------
-    try:
-        await context.bot.send_message(chat_id=group_id, text=text, parse_mode="HTML")
-    except Exception:
-        pass
-
-    # -------------------- Winner Video (Mandatory if set) --------------------
-    if winner and VIDEO_WINNER and VIDEO_WINNER != "VIDEO_FILE_ID_WIN":
+    # -------------------- Send Messages with 1-Second Delays --------------------
+    async def send_scorecard():
         try:
-            await context.bot.send_video(
-                chat_id=group_id,
-                video=VIDEO_WINNER,
-                caption=f"🎉 Champion: <a href='tg://user?id={winner_id}'>{winner_name}</a> 🏆",
-                parse_mode="HTML"
-            )
+            await context.bot.send_message(chat_id=group_id, text=text, parse_mode="HTML")
         except Exception:
-            # If video cannot be sent (e.g., restrictions), just send text only
+            pass
+
+    async def send_winner_announcement():
+        if winner and hasattr(game, "VIDEO_WINNER") and game.VIDEO_WINNER and game.VIDEO_WINNER != "VIDEO_FILE_ID_WIN":
+            try:
+                await context.bot.send_video(
+                    chat_id=group_id,
+                    video=game.VIDEO_WINNER,
+                    caption=f"🎉 Champion: <a href='tg://user?id={winner_id}'>{winner_name}</a> 🏆",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                try:
+                    await context.bot.send_message(
+                        chat_id=group_id,
+                        text=f"🎉 Champion: <a href='tg://user?id={winner_id}'>{winner_name}</a> 🏆",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+        elif winner:
             try:
                 await context.bot.send_message(
                     chat_id=group_id,
@@ -718,8 +765,24 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
             except Exception:
                 pass
 
+    async def send_new_game_notification():
+        try:
+            await context.bot.send_message(
+                chat_id=group_id,
+                text="The game has ended. You can start a new game anytime with /startgame.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+    # Schedule messages as background tasks with 1-second delays using call_later
+    loop = asyncio.get_event_loop()
+    loop.call_later(0, lambda: asyncio.create_task(send_scorecard()))
+    loop.call_later(1, lambda: asyncio.create_task(send_winner_announcement()))
+    loop.call_later(2, lambda: asyncio.create_task(send_new_game_notification()))
+
     # -------------------- Save User Stats --------------------
-    for p in game.players.values():
+    for p in players_sorted:
         try:
             user_obj = type("U", (), {
                 "id": getattr(p, "user_id", None),
@@ -739,16 +802,22 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
             continue
 
     # -------------------- Clean Active Game Data --------------------
-    for p in game.players.values():
+    for p in players_sorted:
         user_active_game.pop(getattr(p, "user_id", None), None)
 
     # Cancel pending async tasks safely
     for t in list(getattr(game, "pick_tasks", {}).values()):
-        if t and not t.done():
-            t.cancel()
+        try:
+            if t and not t.done():
+                t.cancel()
+        except Exception:
+            pass
     for t in list(getattr(game, "pick_30_alerts", {}).values()):
-        if t and not t.done():
-            t.cancel()
+        try:
+            if t and not t.done():
+                t.cancel()
+        except Exception:
+            pass
 
     # Clear task references
     getattr(game, "pick_tasks", {}).clear()
@@ -757,14 +826,6 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     # Remove game from active_games
     active_games.pop(group_id, None)
 
-    # ✅ Notify group ready for new game
-    try:
-        await context.bot.send_message(
-            chat_id=group_id,
-            text=" The game has ended. You can start a new game anytime with /startgame."
-        )
-    except Exception:
-        pass
 
 # -------------------- LOBBY HANDLERS (start/join/leave/players/endmatch) --------------------
 async def startgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -813,7 +874,7 @@ Use /join to join the current game
 Use /leave to leave before the {JOIN_TIME_SEC // 60}-min timer ends
 
 Minimum players: {MIN_PLAYERS}"""
-        buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🛠 Support", url="https://t.me/NexoraBots_Support")]])
+        buttons = InlineKeyboardMarkup([[InlineKeyboardButton("🛠 Support", url="https://t.me/MindScale17")]])
         await query.edit_message_caption(
             caption=welcome_text,
             reply_markup=buttons
@@ -1055,7 +1116,7 @@ async def players(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Support button
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💠 Support", url="https://t.me/NexoraBots_Support")]
+        [InlineKeyboardButton("💠 Support", url="https://t.me/MindScale17")]
     ])
 
     await update.message.reply_photo(
@@ -1176,7 +1237,6 @@ async def confirm_endmatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⏳ All timers cleared."
     )
 
-# -------------------- /USERINFO COMMAND --------------------
 async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user stats in a stylish format."""
     user = update.effective_user
@@ -1214,110 +1274,311 @@ async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     display_name = f"@{username}" if username else first_name
 
     msg = f"""
-『 𝗨𝘀𝗲𝗿 𝗦𝘁𝗮𝘁𝘀 : 𓆩⌬ ‹{display_name}›𓆪 』
+──✦ 𝗣𝗹𝗮𝘆𝗲𝗿 𝗦𝘁𝗮𝘁𝘀 ✦──
+𓆩⌬ ‹{display_name}›𓆪
 
+🎮 Games Played: {games_played}
+🥇 Wins: {wins} | 🥈 Losses: {losses}
 
-🎮 Games Played : {games_played}
-🥇 Wins : {wins}
-🥈 Losses : {losses}
+─⊹⊱⋆⊰─
 
-⊱⋅ ──────────────── ⋅⊰
+📊 Win %: {win_pct:.2f}%
+⭐ Total Score: {total_score}
+🎯 Last Score: {last_score}
+🎲 Rounds: {rounds_played} | ☠️ Eliminations: {eliminations} | ⛔ Penalties: {penalties}
 
-📊 Win % : {win_pct:.2f}%
-⭐ Total Score : {total_score}
-🎯 Last Score : {last_score}
-🎲 Rounds Played : {rounds_played}
-☠️ Eliminations : {eliminations}
-⛔ Penalties : {penalties}
+─⊹⊱⋆⊰─
 
-⊱⋅ ──────────────── ⋅⊰
-
-✧ one match doesn’t define you — the comeback will! 🚀
-
-▭▭▭▭▭▭▭▭▭▭▭▭▭▭
+✧ One match doesn’t define you — the comeback will! 🚀
 """
     await update.message.reply_text(msg, parse_mode="HTML")
 
-# ---------------- Helpers ----------------
+import math
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+import sqlite3
+from config import DB_PATH
+import logging
+
+# Set up logging for debugging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 def get_all_users_sorted():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT username, games_played, wins, losses, user_id
-        FROM users
-        ORDER BY wins DESC
-    """)
-    result = cursor.fetchall()
-    conn.close()
-    return result
+    try:
+        ensure_columns_exist()  # Ensure all columns exist before querying
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row  # Use Row factory for easier access
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                user_id, 
+                IFNULL(username, '') AS username, 
+                IFNULL(first_name, '') AS first_name, 
+                IFNULL(games_played, 0) AS games_played, 
+                IFNULL(wins, 0) AS wins, 
+                IFNULL(losses, 0) AS losses, 
+                IFNULL(rounds_played, 0) AS rounds_played, 
+                IFNULL(eliminations, 0) AS eliminations, 
+                IFNULL(total_score, 0) AS total_score, 
+                IFNULL(penalties, 0) AS penalties
+            FROM users
+            ORDER BY wins DESC, total_score DESC
+            LIMIT 100  -- Limit to prevent excessive data
+        """)
+        result = cursor.fetchall()
+        conn.close()
+        logger.info(f"Fetched {len(result)} users from database")
+        return result
+    except Exception as e:
+        logger.error(f"Error in get_all_users_sorted: {e}")
+        return []
 
 def get_user_rank(user_id):
-    all_users = get_all_users_sorted()
-    for idx, (username, games_played, wins, losses, uid) in enumerate(all_users, start=1):
-        if uid == user_id:
-            win_percent = round(wins / games_played * 100, 1) if games_played > 0 else 0
-            return {
-                "username": username,
-                "rank": idx,
-                "total_users": len(all_users),
-                "total_played": games_played,
-                "wins": wins,
-                "losses": losses,
-                "win_percent": win_percent
-            }
-    return None
+    try:
+        all_users = get_all_users_sorted()
+        for idx, row in enumerate(all_users, start=1):
+            if row['user_id'] == user_id:
+                win_percent = round(row['wins'] / row['games_played'] * 100, 1) if row['games_played'] > 0 else 0
+                return {
+                    "username": row['username'] or row['first_name'] or "Unknown",
+                    "rank": idx,
+                    "total_users": len(all_users),
+                    "total_played": row['games_played'],
+                    "wins": row['wins'],
+                    "losses": row['losses'],
+                    "win_percent": win_percent,
+                    "rounds_played": row['rounds_played'],
+                    "eliminations": row['eliminations'],
+                    "total_score": row['total_score'],
+                    "penalties": row['penalties']
+                }
+        # Return default stats if user not found
+        return {
+            "username": "Unknown",
+            "rank": len(all_users) + 1,
+            "total_users": len(all_users),
+            "total_played": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_percent": 0,
+            "rounds_played": 0,
+            "eliminations": 0,
+            "total_score": 0,
+            "penalties": 0
+        }
+    except Exception as e:
+        logger.error(f"Error in get_user_rank: {e}")
+        return {
+            "username": "Unknown",
+            "rank": 1,
+            "total_users": 0,
+            "total_played": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_percent": 0,
+            "rounds_played": 0,
+            "eliminations": 0,
+            "total_score": 0,
+            "penalties": 0
+        }
 
-# ---------------- /leaderboard ----------------
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+import math
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.ext import ContextTypes
+import logging
+import asyncio
+from PIL import Image, ImageDraw
+import requests
+from io import BytesIO
+
+import math
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+import logging
+import asyncio
+from PIL import Image
+import requests
+from io import BytesIO
+import os
+import uuid
+
+# Set up logging for debugging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+async def generate_leaderboard_image(user_id, base_image_url, caption, context):
+    try:
+        # Check if leaderboard.jpg exists locally
+        if not os.path.exists("leaderboard.jpg"):
+            logger.info("leaderboard.jpg not found, downloading from URL")
+            base_response = requests.get(base_image_url, timeout=5)
+            base_image = Image.open(BytesIO(base_response.content)).convert("RGBA")
+            base_image_rgb = base_image.convert("RGB")
+            base_image_rgb.save("leaderboard.jpg", "JPEG")
+        else:
+            logger.info("Using existing leaderboard.jpg")
+
+        # Load saved image
+        base_image = Image.open("leaderboard.jpg").convert("RGBA")
+
+        # Save final image as PNG
+        temp_file = f"temp_leaderboard_{uuid.uuid4()}.png"
+        base_image.save(temp_file, "PNG")
+        return temp_file
+    except Exception as e:
+        logger.error(f"Error generating leaderboard image: {e}")
+        return None
+
+async def generate_leaderboard_task(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
     user_id = update.effective_user.id
     all_users = get_all_users_sorted()
-    text = "𝐓𝐎𝐏 𝐏𝐋𝐀𝐘𝐄𝐑𝐒\n\n"
+    per_page = 5
+    total_pages = max(1, math.ceil(len(all_users) / per_page))
+    page = max(1, min(page, total_pages))
+    logger.info(f"Total users: {len(all_users)}, Total pages: {total_pages}, Current page: {page}")
 
-    top_limit = 5
-    user_in_top = False
+    text = "──✦ Player Spotlight ✦──\n\n"
+    user_in_page = False
     user_stats = None
 
-    for i, (username, games_played, wins, losses, uid) in enumerate(all_users, start=1):
-        if i > top_limit and uid != user_id:
-            continue
+    start_idx = (page - 1) * per_page
+    end_idx = min(start_idx + per_page, len(all_users))
 
+    for i, row in enumerate(all_users[start_idx:end_idx], start=start_idx + 1):
+        games_played = row['games_played'] or 0
+        wins = row['wins'] or 0
+        losses = row['losses'] or 0
+        rounds_played = row['rounds_played'] or 0
+        eliminations = row['eliminations'] or 0
+        total_score = row['total_score'] or 0
+        penalties = row['penalties'] or 0
         win_percent = round(wins / games_played * 100, 1) if games_played > 0 else 0
-        highlight = "⭐ " if uid == user_id else ""
-        text += f"{i}. {highlight}{username} \n"
-        text += f"   🎮 Played: {games_played} |  Wins: {wins} |  Losses: {losses} |  Win %: {win_percent}\n"
-        text += f"   🆔 {uid}\n"
-        text += "────────────\n"
-
-        if uid == user_id:
-            user_in_top = True
+        display_name = row['first_name'] or "Unknown"
+        highlight = "⭐ " if row['user_id'] == user_id else ""
+        text += f"────⊱◈◈◈⊰────\n"
+        text += f"{i}. {highlight}{display_name}\n"
+        text += f"   ⧉ Win%: {win_percent} | 🎮 {games_played}\n"
+        text += f"   🏆 {wins} | {losses} Lost\n"
+        text += f"   🔄 Rounds: {rounds_played} | ☠️ Elim: {eliminations}\n"
+        text += f"   ⭐ Score: {total_score} | ⛔ Pen: {penalties}\n"
+        text += f"   ID: {row['user_id']}\n"
+        if row['user_id'] == user_id:
+            user_in_page = True
             user_stats = {
                 "rank": i,
-                "username": username,
+                "username": display_name,
                 "total_played": games_played,
                 "wins": wins,
                 "losses": losses,
-                "win_percent": win_percent
+                "win_percent": win_percent,
+                "rounds_played": rounds_played,
+                "eliminations": eliminations,
+                "total_score": total_score,
+                "penalties": penalties
             }
 
-    # If user not in top 5, append their rank explicitly
-    if not user_in_top and user_stats is None:
+    if not user_in_page:
         user_stats = get_user_rank(user_id)
-        if user_stats:
-            text += f"\n📌 Your Rank:\n"
-            text += f"{user_stats['rank']}. {user_stats['username']} \n"
-            text += f"  Played: {user_stats['total_played']} |  Wins: {user_stats['wins']} |  Losses: {user_stats['losses']} |  Win %: {user_stats['win_percent']}\n"
-            text += f"   🆔 {user_id}\n"
-            text += "──────────────\n"
+        text += f"\n────⊱◈◈◈⊰────\n"
+        text += f"📌 Your Rank:\n"
+        text += f"{user_stats['rank']}. {user_stats['username']}\n"
+        text += f"   ⧉ Win%: {user_stats['win_percent']} | 🎮 {user_stats['total_played']}\n"
+        text += f"   🏆 {user_stats['wins']} | {user_stats['losses']} Lost\n"
+        text += f"   🔄 Rounds: {user_stats['rounds_played']} | ☠️ Elim: {user_stats['eliminations']}\n"
+        text += f"   ⭐ Score: {user_stats['total_score']} | ⛔ Pen: {user_stats['penalties']}\n"
+        text += f"   ID: {user_id}\n"
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    text += f"────⊱◈◈◈⊰────\nPage {page}/{total_pages}"
 
-# ---------------- /users_rank ----------------
+    # Updated base image URL
+    base_image_url = "https://graph.org/file/ca04194ed4b8b48eafcab-ab92ca372392f43809.jpg"
+
+    keyboard = []
+    if total_pages > 1:
+        buttons = []
+        if page > 1:
+            buttons.append(InlineKeyboardButton("◄ Previous", callback_data=f"leaderboard_{page-1}"))
+        if page < total_pages:
+            buttons.append(InlineKeyboardButton("Next ►", callback_data=f"leaderboard_{page+1}"))
+        keyboard.append(buttons)
+        logger.info(f"Buttons created: {buttons}")
+
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+
+    try:
+        if update.callback_query:
+            logger.info("Editing message with new leaderboard photo")
+            temp_file = await generate_leaderboard_image(user_id, base_image_url, text, context)
+            if temp_file:
+                with open(temp_file, "rb") as photo:
+                    await update.callback_query.message.edit_media(
+                        media=InputMediaPhoto(
+                            media=photo,
+                            caption=text,
+                            parse_mode="HTML"
+                        ),
+                        reply_markup=reply_markup
+                    )
+                os.remove(temp_file)
+            else:
+                await update.callback_query.message.edit_caption(
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+            await update.callback_query.answer()
+            logger.info("Callback query answered successfully")
+        else:
+            logger.info("Sending new leaderboard photo")
+            temp_file = await generate_leaderboard_image(user_id, base_image_url, text, context)
+            if temp_file:
+                with open(temp_file, "rb") as photo:
+                    await update.message.reply_photo(
+                        photo=photo,
+                        caption=text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML"
+                    )
+                os.remove(temp_file)
+            else:
+                await update.message.reply_photo(
+                    photo=base_image_url,
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+    except Exception as e:
+        logger.error(f"Error in leaderboard: {e}")
+        error_message = "An error occurred. Please try again."
+        if update.callback_query:
+            await update.callback_query.message.reply_text(error_message)
+            await update.callback_query.answer()
+        else:
+            await update.message.reply_text(error_message)
+
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Leaderboard command received")
+    # Run leaderboard generation in background task
+    asyncio.create_task(generate_leaderboard_task(update, context, 1))
+
+async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Leaderboard callback received")
+    query = update.callback_query
+    if query.data and query.data.startswith('leaderboard_'):
+        try:
+            page = int(query.data.split('_')[1])
+            asyncio.create_task(generate_leaderboard_task(update, context, page))
+        except (IndexError, ValueError) as e:
+            logger.warning(f"Invalid callback data: {query.data}, error: {e}")
+            await query.answer()
+
+
+#users_rank
+
 async def users_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_user_rank(user_id)
-    if not stats:
-        await update.message.reply_text("❌ You are not yet on the leaderboard.")
-        return
 
     text = (
         f"🏆 𝐘𝐎𝐔𝐑 𝐑𝐀𝐍𝐊\n\n"
@@ -1400,7 +1661,9 @@ def register_handlers(app):
     app.add_handler(CommandHandler("endgame", endmatch))
     app.add_handler(CommandHandler("forcestart", forcestart))
     app.add_handler(CommandHandler("userinfo", userinfo))
-    app.add_handler(CommandHandler("leaderboard", leaderboard))
+    app.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    
+
     app.add_handler(CommandHandler("users_rank", users_rank))
     app.add_handler(
         CallbackQueryHandler(confirm_endmatch, pattern=r"^confirm_endmatch:-?\d+$")
@@ -1409,3 +1672,4 @@ def register_handlers(app):
         CallbackQueryHandler(mode_selection, pattern=r"^(start_solo|start_team):-?\d+$")
     )
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, dm_pick_handler))
+    app.add_handler(CallbackQueryHandler(leaderboard_callback, pattern='^leaderboard_'))
