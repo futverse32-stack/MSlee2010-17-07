@@ -691,7 +691,8 @@ if __name__ == "__main__":
     # ---------------- Background Tasks ----------------
     # Start auto backup loop
     app.job_queue.run_repeating(lambda ctx: asyncio.create_task(auto_backup(app)), interval=12*3600, first=10)
-
+    import game
+    game.register_handlers  
     import owner
     owner.register_owner_handlers
 
