@@ -62,6 +62,49 @@ def init_user_table():
     conn.commit()
     conn.close()
 
+
+
+def init_group_table():
+    """Initialize the groups table with a games_played column."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS groups (
+            group_id INTEGER PRIMARY KEY,
+            title TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            games_played INTEGER DEFAULT 0
+        )
+        """
+    )
+    # Ensure games_played column exists
+    c.execute("PRAGMA table_info(groups)")
+    columns = [col[1] for col in c.fetchall()]
+    if "games_played" not in columns:
+        c.execute("ALTER TABLE groups ADD COLUMN games_played INTEGER DEFAULT 0")
+    conn.commit()
+    conn.close()
+
+def ensure_group_exists(group_id: int, title: str):
+    """Insert group into groups table if not present."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT group_id FROM groups WHERE group_id = ?", (group_id,))
+    if not c.fetchone():
+        c.execute(
+            "INSERT INTO groups (group_id, title, games_played) VALUES (?, ?, 0)",
+            (group_id, title)
+        )
+    else:
+        c.execute(
+            "UPDATE groups SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE group_id = ?",
+            (title, group_id)
+        )
+    conn.commit()
+    conn.close()
+
+
 def ensure_user_exists(user):
     """Insert user if not present"""
     conn = sqlite3.connect(DB_PATH)
@@ -168,6 +211,7 @@ class MindScaleGame:
         self.pick_30_alerts: Dict[int, asyncio.Task] = {}  # user_id -> asyncio.Task for 30s alert
         self.score_history: list = []                      # list of per-round results
         self.join_timer_task: Optional[asyncio.Task] = None # Track join phase timer task
+
 
     @property
     def active_players(self):
@@ -686,19 +730,43 @@ async def dm_pick_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Process round results immediately
         await process_round_results(context, group_id)
 
+
 async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     """
     Finalize the match: send final scoreboard in Nex-style, announce winner,
-    save user stats, cancel tasks, and clean active game data.
+    save user stats, increment group games_played, cancel tasks, and clean active game data.
     """
     if group_id not in active_games:
+        logger.debug(f"No active game found for group_id {group_id}")
         return
     game = active_games[group_id]
 
     # Prevent duplicate end_game call
     if getattr(game, "ended", False):
+        logger.debug(f"Game already ended for group_id {group_id}")
         return
     game.ended = True
+
+    # Ensure group exists in database and increment games_played
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT group_id FROM groups WHERE group_id = ?", (group_id,))
+        if not c.fetchone():
+            # If group doesn't exist, add it (title may be updated later)
+            c.execute(
+                "INSERT INTO groups (group_id, title, games_played) VALUES (?, ?, 0)",
+                (group_id, "Unknown Group")
+            )
+        c.execute(
+            "UPDATE groups SET games_played = games_played + 1 WHERE group_id = ?",
+            (group_id,)
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to update games_played for group {group_id}: {e}")
+    finally:
+        conn.close()
 
     # -------------------- Final Scoreboard (Nex Style) --------------------
     players_sorted = sorted(
@@ -734,27 +802,28 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     async def send_scorecard():
         try:
             await context.bot.send_message(chat_id=group_id, text=text, parse_mode="HTML")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to send scorecard for group {group_id}: {e}")
 
     async def send_winner_announcement():
-        if winner and hasattr(game, "VIDEO_WINNER") and game.VIDEO_WINNER and game.VIDEO_WINNER != "VIDEO_FILE_ID_WIN":
+        if winner and VIDEO_WINNER and VIDEO_WINNER != "VIDEO_FILE_ID_WIN":
             try:
                 await context.bot.send_video(
                     chat_id=group_id,
-                    video=game.VIDEO_WINNER,
+                    video=VIDEO_WINNER,
                     caption=f"🎉 Champion: <a href='tg://user?id={winner_id}'>{winner_name}</a> 🏆",
                     parse_mode="HTML"
                 )
-            except Exception:
+            except Exception as e:
+                logger.error(f"Failed to send winner video for group {group_id}: {e}")
                 try:
                     await context.bot.send_message(
                         chat_id=group_id,
                         text=f"🎉 Champion: <a href='tg://user?id={winner_id}'>{winner_name}</a> 🏆",
                         parse_mode="HTML"
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to send fallback winner message for group {group_id}: {e}")
         elif winner:
             try:
                 await context.bot.send_message(
@@ -762,8 +831,8 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
                     text=f"🎉 Champion: <a href='tg://user?id={winner_id}'>{winner_name}</a> 🏆",
                     parse_mode="HTML"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Failed to send winner message for group {group_id}: {e}")
 
     async def send_new_game_notification():
         try:
@@ -772,8 +841,8 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
                 text="The game has ended. You can start a new game anytime with /startgame.",
                 parse_mode="HTML"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to send new game notification for group {group_id}: {e}")
 
     # Schedule messages as background tasks with 1-second delays using call_later
     loop = asyncio.get_event_loop()
@@ -798,7 +867,8 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
                 rounds_played=getattr(p, "rounds_played", 0),
                 penalties=getattr(p, "total_penalties", 0)
             )
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to update stats for user {getattr(p, 'user_id', 'unknown')}: {e}")
             continue
 
     # -------------------- Clean Active Game Data --------------------
@@ -810,14 +880,14 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         try:
             if t and not t.done():
                 t.cancel()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to cancel pick task for group {group_id}: {e}")
     for t in list(getattr(game, "pick_30_alerts", {}).values()):
         try:
             if t and not t.done():
                 t.cancel()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to cancel pick_30_alerts task for group {group_id}: {e}")
 
     # Clear task references
     getattr(game, "pick_tasks", {}).clear()
@@ -825,6 +895,7 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
 
     # Remove game from active_games
     active_games.pop(group_id, None)
+    logger.debug(f"Game ended and cleaned up for group {group_id}")
 
 
 # -------------------- LOBBY HANDLERS (start/join/leave/players/endmatch) --------------------
@@ -1651,9 +1722,12 @@ async def forcestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=f"🚀 𝗙𝗼𝗿𝗰𝗲 𝗦𝘁𝗮𝗿𝘁\n\n✅ Admin has started the game early!"
     )
     await end_join_phase(context, group_id)
-# Update register_handlers to include forcestart
+
+#handlers
+
 def register_handlers(app):
     init_user_table()
+    init_group_table()  # NEW: Initialize groups table
     app.add_handler(CommandHandler("startgame", startgame))
     app.add_handler(CommandHandler("join", join))
     app.add_handler(CommandHandler("leave", leave))
@@ -1662,8 +1736,6 @@ def register_handlers(app):
     app.add_handler(CommandHandler("forcestart", forcestart))
     app.add_handler(CommandHandler("userinfo", userinfo))
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    
-
     app.add_handler(CommandHandler("users_rank", users_rank))
     app.add_handler(
         CallbackQueryHandler(confirm_endmatch, pattern=r"^confirm_endmatch:-?\d+$")
