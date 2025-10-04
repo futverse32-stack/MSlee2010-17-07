@@ -170,14 +170,21 @@ async def bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_text = f"🆕 New Group Added\nName: {chat.title or 'Private/Unknown'}\n" \
                    f"Link: {group_link}\nID: {chat.id}\nAdded by: @{added_by.username or added_by.full_name}"
         await context.bot.send_message(chat_id=LOG_CHAT_ID, text=log_text)
+
+
 import sqlite3
 import os
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes, CallbackQueryHandler
+from telegram.error import BadRequest
 from datetime import datetime, timedelta
+from config import DB_PATH  # Ensure DB_PATH is defined in config.py
+import logging
+
+logger = logging.getLogger(__name__)
 
 def stats_buttons():
-    """Generate inline buttons for stats categories"""
+    """Generate inline buttons for stats categories."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📊 Bot Stats", callback_data="stats_bot"),
@@ -185,134 +192,174 @@ def stats_buttons():
         ],
         [
             InlineKeyboardButton("🏘 Group Stats", callback_data="stats_groups"),
-            InlineKeyboardButton("🌟 Top 3 Players", callback_data="stats_top_players"),
+            InlineKeyboardButton("🌟 Top Players", callback_data="stats_top_players"),
         ],
     ])
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show brief bot stats overview with buttons to view detailed categories"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    """Show a concise bot stats overview with buttons for detailed categories."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
 
-    # Basic stats for initial message
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
+        # Fetch basic stats
+        c.execute("SELECT COUNT(*) FROM users")
+        total_users = c.fetchone()[0]
 
-    c.execute("SELECT COUNT(*) FROM groups")
-    total_groups = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM groups")
+        total_groups = c.fetchone()[0]
 
-    c.execute("SELECT SUM(games_played) FROM users")
-    total_games = c.fetchone()[0] or 0
+        c.execute("SELECT SUM(games_played) FROM users")
+        total_games = c.fetchone()[0] or 0
 
-    conn.close()
+        conn.close()
 
-    overview_text = (
-        f"📊 <b>Bot Statistics Overview</b> 📊\n\n"
-        f"👥 <b>Total Users</b>: {total_users}\n"
-        f"🏘 <b>Total Groups</b>: {total_groups}\n"
-        f"🎮 <b>Total Games Played</b>: {total_games}\n\n"
-        f"🔎 Select a category below for detailed stats:"
-    )
+        overview_text = (
+            "<b>Bot Statistics</b>\n\n"
+            f"👥 Users: {total_users}\n"
+            f"🏘 Groups: {total_groups}\n"
+            f"🎮 Games Played: {total_games}\n\n"
+            "Select a category for details:"
+        )
 
-    await update.message.reply_text(overview_text, parse_mode="HTML", reply_markup=stats_buttons())
+        await update.message.reply_text(overview_text, parse_mode="HTML", reply_markup=stats_buttons())
+        # Reset current category when showing overview
+        context.chat_data['current_stats_category'] = None
+    except Exception as e:
+        logger.error(f"Error in stats command: {e}")
+        await update.message.reply_text("❌ Error fetching stats. Try again later.")
 
 async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks for detailed stats"""
+    """Handle button clicks for detailed stats with clean formatting."""
     query = update.callback_query
     await query.answer()
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    # Get selected category
+    selected_category = query.data.replace("stats_", "")
 
-    # Fetch all required data
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
+    # Check if the selected category is already displayed
+    current_category = context.chat_data.get('current_stats_category')
+    if current_category == selected_category:
+        logger.debug(f"User attempted to view same stats category: {selected_category}")
+        try:
+            await query.message.reply_text("ℹ️ You're already viewing this stats category.")
+        except Exception as e:
+            logger.error(f"Error sending same-category message: {e}")
+        return
 
-    c.execute("SELECT COUNT(*) FROM groups")
-    total_groups = c.fetchone()[0]
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
 
-    c.execute("SELECT SUM(wins), SUM(losses), SUM(games_played), SUM(penalties) FROM users")
-    sums = c.fetchone()
-    total_wins = sums[0] or 0
-    total_losses = sums[1] or 0
-    total_games = sums[2] or 0
-    total_penalties = sums[3] or 0
+        # Fetch all required data
+        c.execute("SELECT COUNT(*) FROM users")
+        total_users = c.fetchone()[0]
 
-    db_size_bytes = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
-    db_size_mb = db_size_bytes / (1024 * 1024)
-    storage_percentage = (db_size_mb / 500) * 100
+        c.execute("SELECT COUNT(*) FROM groups")
+        total_groups = c.fetchone()[0]
 
-    seven_days_ago = datetime.datetime.now() - timedelta(days=7)
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM users WHERE updated_at >= ?", (seven_days_ago,))
-    active_users = c.fetchone()[0]
+        c.execute("SELECT SUM(wins), SUM(losses), SUM(games_played), SUM(penalties) FROM users")
+        sums = c.fetchone()
+        total_wins = sums[0] or 0
+        total_losses = sums[1] or 0
+        total_games = sums[2] or 0
+        total_penalties = sums[3] or 0
 
-    one_day_ago = datetime.datetime.now() - timedelta(days=1)
-    c.execute("SELECT COUNT(*) FROM users WHERE updated_at >= ? AND games_played > 0", (one_day_ago,))
-    recent_games = c.fetchone()[0]
+        db_size_bytes = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+        db_size_mb = db_size_bytes / (1024 * 1024)
+        storage_percentage = (db_size_mb / 500) * 100
 
-    avg_games_per_user = total_games / total_users if total_users > 0 else 0
+        seven_days_ago = datetime.datetime.now() - timedelta(days=7)
+        c.execute("SELECT COUNT(DISTINCT user_id) FROM users WHERE updated_at >= ?", (seven_days_ago,))
+        active_users = c.fetchone()[0]
 
-    c.execute("SELECT first_name, username, wins FROM users ORDER BY wins DESC LIMIT 3")
-    top_players = c.fetchall()
-    top_players_info = "\n".join(
-        f"{i+1}. {row[0]} (@{row[1] or 'N/A'}) - {row[2]} wins" for i, row in enumerate(top_players)
-    ) if top_players else "N/A"
+        one_day_ago = datetime.datetime.now() - timedelta(days=1)
+        c.execute("SELECT COUNT(*) FROM users WHERE updated_at >= ? AND games_played > 0", (one_day_ago,))
+        recent_games = c.fetchone()[0]
 
-    c.execute("SELECT AVG(total_score) FROM users")
-    avg_score = c.fetchone()[0] or 0
+        avg_games_per_user = total_games / total_users if total_users > 0 else 0
 
-    c.execute("SELECT title, group_id FROM groups ORDER BY created_at DESC LIMIT 1")
-    most_active_group = c.fetchone()
-    most_active_group_info = f"{most_active_group[0]} (ID: {most_active_group[1]})" if most_active_group else "N/A"
+        c.execute("SELECT first_name, username, wins FROM users ORDER BY wins DESC LIMIT 3")
+        top_players = c.fetchall()
+        top_players_info = "\n".join(
+            f"{i+1}. {row[0]} (@{row[1] or 'N/A'}) - {row[2]} wins"
+            for i, row in enumerate(top_players)
+        ) if top_players else "No players with wins yet."
 
-    c.execute("SELECT COUNT(*) FROM users WHERE games_played = 0")
-    inactive_users = c.fetchone()[0]
+        c.execute("SELECT AVG(total_score) FROM users")
+        avg_score = c.fetchone()[0] or 0
 
-    win_rate = (total_wins / total_games * 100) if total_games > 0 else 0
-
-    c.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (seven_days_ago,))
-    recent_registrations = c.fetchone()[0]
-
-    conn.close()
-
-    # Prepare response based on button clicked
-    key = query.data.replace("stats_", "")
-    if key == "bot":
-        text = (
-            f"📊 <b>Bot Stats</b> 📊\n\n"
-            f"💾 <b>Storage Used</b>: {db_size_mb:.2f} MB / 500 MB ({storage_percentage:.2f}%)\n"
-            f"🎮 <b>Total Games Played</b>: {total_games}\n"
-            f"📉 <b>Win Rate</b>: {win_rate:.2f}%"
+        c.execute("SELECT title, group_id, games_played FROM groups ORDER BY games_played DESC LIMIT 1")
+        most_active_group = c.fetchone()
+        most_active_group_info = (
+            f"{most_active_group[0]} (ID: {most_active_group[1]}, Games: {most_active_group[2]})"
+            if most_active_group and most_active_group[2] > 0 else "No games played yet."
         )
-    elif key == "users":
-        text = (
-            f"👥 <b>User Stats</b> 👥\n\n"
-            f"👥 <b>Total Users</b>: {total_users}\n"
-            f"🕒 <b>Active Users (last 7 days)</b>: {active_users}\n"
-            f"😴 <b>Inactive Users</b>: {inactive_users}\n"
-            f"🆕 <b>New Registrations (last 7 days)</b>: {recent_registrations}\n"
-            f"📈 <b>Avg. Games per User</b>: {avg_games_per_user:.2f}\n"
-            f"📊 <b>Average Score</b>: {avg_score:.2f}"
-        )
-    elif key == "groups":
-        text = (
-            f"🏘 <b>Group Stats</b> 🏘\n\n"
-            f"🏘 <b>Total Groups</b>: {total_groups}\n"
-            f"👥 <b>Most Active Group</b>: {most_active_group_info}\n"
-            f"🎲 <b>Recent Games (last 24h)</b>: {recent_games}"
-        )
-    elif key == "top_players":
-        text = (
-            f"🌟 <b>Top 3 Players by Wins</b> 🌟\n\n"
-            f"{top_players_info}\n\n"
-            f"⚠️ <b>Total Penalties</b>: {total_penalties}\n"
-            f"🏆 <b>Total Wins</b>: {total_wins}\n"
-            f"❌ <b>Total Losses</b>: {total_losses}"
-        )
-    else:
-        text = "❌ Unknown category"
 
-    await query.edit_message_text(text=text, parse_mode="HTML", reply_markup=stats_buttons())
+        c.execute("SELECT COUNT(*) FROM users WHERE games_played = 0")
+        inactive_users = c.fetchone()[0]
+
+        win_rate = (total_wins / total_games * 100) if total_games > 0 else 0
+
+        c.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (seven_days_ago,))
+        recent_registrations = c.fetchone()[0]
+
+        conn.close()
+
+        # Prepare response based on button clicked
+        if selected_category == "bot":
+            text = (
+                "<b>Bot Stats</b>\n\n"
+                f"💾 Storage: {db_size_mb:.2f} MB ({storage_percentage:.1f}% of 500 MB)\n"
+                f"🎮 Total Games: {total_games}\n"
+                f"🏆 Win Rate: {win_rate:.1f}%"
+            )
+        elif selected_category == "users":
+            text = (
+                "<b>User Stats</b>\n\n"
+                f"👥 Total Users: {total_users}\n"
+                f"🕒 Active Users (7 days): {active_users}\n"
+                f"😴 Inactive Users: {inactive_users}\n"
+                f"🆕 New Users (7 days): {recent_registrations}\n"
+                f"🎮 Avg. Games/User: {avg_games_per_user:.1f}\n"
+                f"📊 Avg. Score: {avg_score:.1f}"
+            )
+        elif selected_category == "groups":
+            text = (
+                "<b>Group Stats</b>\n\n"
+                f"🏘 Total Groups: {total_groups}\n"
+                f"🏆 Most Active Group: {most_active_group_info}\n"
+                f"🎲 Recent Games (24h): {recent_games}"
+            )
+        elif selected_category == "top_players":
+            text = (
+                "<b>Top 3 Players</b>\n\n"
+                f"{top_players_info}\n\n"
+                f"⚠️ Total Penalties: {total_penalties}\n"
+                f"🏆 Total Wins: {total_wins}\n"
+                f"❌ Total Losses: {total_losses}"
+            )
+        else:
+            text = "❌ Unknown category"
+
+        # Update message and store current category
+        await query.edit_message_text(text=text, parse_mode="HTML", reply_markup=stats_buttons())
+        context.chat_data['current_stats_category'] = selected_category
+        logger.debug(f"Displayed stats category: {selected_category}")
+
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            logger.debug(f"Message not modified for category {selected_category}")
+            try:
+                await query.message.reply_text("ℹ️ You're already viewing this stats category.")
+            except Exception as reply_e:
+                logger.error(f"Error sending same-category message: {reply_e}")
+        else:
+            logger.error(f"BadRequest in stats_callback: {e}")
+            await query.message.reply_text("❌ Error updating stats. Try again later.")
+    except Exception as e:
+        logger.error(f"Error in stats_callback: {e}")
+        await query.message.reply_text("❌ Error fetching stats. Try again later.")
 
 
 import game
@@ -336,43 +383,23 @@ async def getid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = reply.video.file_id
     await update.message.reply_text(f"✅ Video file_id:\n<code>{file_id}</code>", parse_mode="HTML")
 
-import game
-from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
-# ---------------- /getid COMMAND ----------------
-async def getid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    DM command: reply to a video and send its file_id
-    """
-    if update.effective_chat.type != "private":
-        await update.message.reply_text("This command only works in DMs with the bot.")
-        return
-
-    reply = update.message.reply_to_message
-    if not reply or not reply.video:
-        await update.message.reply_text("❌ Reply to a video message to get its file_id.")
-        return
-
-    file_id = reply.video.file_id
-    await update.message.reply_text(f"✅ Video file_id:\n<code>{file_id}</code>", parse_mode="HTML")
 from telegram import Message, Update
 from telegram.ext import ContextTypes
 import sqlite3
 import asyncio
-from functools import partial
 import logging
 
 # Set up logging for debugging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-async def fetch_ids():
+async def fetch_ids(db_path):
     """Fetch group and user IDs in a separate thread."""
     loop = asyncio.get_event_loop()
     def get_ids():
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = sqlite3.connect(db_path)
             c = conn.cursor()
             c.execute("SELECT group_id FROM groups")
             groups = [row[0] for row in c.fetchall()]
@@ -385,8 +412,8 @@ async def fetch_ids():
             return [], []
     return await loop.run_in_executor(None, get_ids)
 
-async def broadcast_task(bot, reply: Message, groups: list, users: list):
-    """Background broadcast fully detached from update"""
+async def broadcast_task(bot, reply: Message, groups: list, users: list, owner_id: int):
+    """Background broadcast fully detached from update."""
     success_groups = 0
     success_users = 0
 
@@ -395,8 +422,9 @@ async def broadcast_task(bot, reply: Message, groups: list, users: list):
         try:
             await reply.forward(chat_id=gid)
             success_groups += 1
-            await asyncio.sleep(0)  # yield control
-        except Exception:
+            await asyncio.sleep(0.05)  # Small delay to respect Telegram rate limits
+        except Exception as e:
+            logger.debug(f"Failed to forward to group {gid}: {e}")
             continue
 
     # Broadcast to users
@@ -404,27 +432,29 @@ async def broadcast_task(bot, reply: Message, groups: list, users: list):
         try:
             await reply.forward(chat_id=uid)
             success_users += 1
-            await asyncio.sleep(0)  # yield control
-        except Exception:
+            await asyncio.sleep(0.05)  # Small delay to respect Telegram rate limits
+        except Exception as e:
+            logger.debug(f"Failed to forward to user {uid}: {e}")
             continue
 
     # Log result to owner
     try:
         await bot.send_message(
-            chat_id=OWNER_ID,
+            chat_id=owner_id,
             text=f"✅ Broadcast done!\nGroups: {success_groups}/{len(groups)}\nUsers: {success_users}/{len(users)}"
         )
-    except Exception:
-        pass
-
-
+    except Exception as e:
+        logger.error(f"Failed to send broadcast completion message to owner: {e}")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast a replied message to all users and groups (OWNER ONLY)"""
+    """Broadcast a replied message to all users and groups (OWNER ONLY)."""
+    from config import DB_PATH, OWNER_ID  # Import here to avoid circular imports
+
     user = update.effective_user
     if user.id != OWNER_ID:
         await update.message.reply_text("❌ You are not authorized to use this command.")
         return
+
     reply: Message = update.message.reply_to_message
     if not reply:
         await update.message.reply_text("❌ Reply to a message to broadcast it.")
@@ -439,14 +469,20 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Fetch IDs in a separate thread
     try:
-        groups, users = await fetch_ids()
+        groups, users = await fetch_ids(DB_PATH)
     except Exception as e:
         logger.error(f"Failed to fetch IDs: {e}")
         await update.message.reply_text("❌ Failed to fetch recipients. Try again later.")
         return
 
     # Run broadcast in background
-    asyncio.create_task(broadcast_task(reply, groups, users, update, context))
+    try:
+        asyncio.create_task(broadcast_task(context.bot, reply, groups, users, OWNER_ID))
+        logger.info("Broadcast task started in background")
+    except Exception as e:
+        logger.error(f"Failed to start broadcast task: {e}")
+        await update.message.reply_text("❌ Failed to start broadcast. Try again later.")
+
 import os
 import shutil
 import datetime
@@ -514,6 +550,8 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Database restored successfully!")
     except Exception as e:
         await update.message.reply_text(f"❌ Failed to restore database: {e}")
+
+
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes, CallbackQueryHandler, CommandHandler
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
@@ -652,11 +690,7 @@ async def bugs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=report_msg,
         parse_mode="HTML"
     )
-from telegram.ext import ApplicationBuilder
 
-
-
-#
 if __name__ == "__main__":
     # Init database
     init_db()
@@ -664,26 +698,16 @@ if __name__ == "__main__":
     # Build app
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-  # Add owner handlers in group 0 (default)
-
-    # ---------------- Group 1: Game Handlers ----------------
-    import game
-    game.register_handlers  # Add game handlers in group 1
-
     # ---------------- Other Command Handlers (Group 0) ----------------
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats_"))
-
     app.add_handler(CommandHandler("getid", getid_command))
     app.add_handler(CommandHandler("cast", broadcast_command))
     app.add_handler(CommandHandler("backup", backup_command))
     app.add_handler(CommandHandler("restore", restore_command))
-
     app.add_handler(CommandHandler("guide", guide_command))
     app.add_handler(CallbackQueryHandler(guide_callback, pattern="^guide_"))
-
-
 
     # ---------------- ChatMember Handler (bot added to group) ----------------
     app.add_handler(ChatMemberHandler(bot_added, ChatMemberHandler.MY_CHAT_MEMBER))
@@ -691,10 +715,13 @@ if __name__ == "__main__":
     # ---------------- Background Tasks ----------------
     # Start auto backup loop
     app.job_queue.run_repeating(lambda ctx: asyncio.create_task(auto_backup(app)), interval=12*3600, first=10)
+
+    # ---------------- Register Game and Owner Handlers ----------------
     import game
-    game.register_handlers  
+    game.register_handlers(app)  # Call with (app) to register game commands
+
     import owner
-    owner.register_owner_handlers
+    owner.register_owner_handlers(app)  # Call with (app) to register owner commands
 
     # ---------------- Run ----------------
     print("✅ Bot is running...")
