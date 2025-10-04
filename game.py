@@ -1453,53 +1453,98 @@ def get_user_rank(user_id):
             "total_score": 0,
             "penalties": 0
         }
+# game.py (modified to fix HTML parsing and optimize leaderboard performance)
+# Only leaderboard-related functions are updated.
 
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import ContextTypes
+import sqlite3
+from config import DB_PATH
 import logging
-import asyncio
-from PIL import Image, ImageDraw
-import requests
-from io import BytesIO
-
-import math
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import logging
-import asyncio
-from PIL import Image
-import requests
-from io import BytesIO
-import os
-import uuid
+import html
 
 # Set up logging for debugging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-async def generate_leaderboard_image(user_id, base_image_url, caption, context):
+def get_all_users_sorted():
     try:
-        # Check if leaderboard.jpg exists locally
-        if not os.path.exists("leaderboard.jpg"):
-            logger.info("leaderboard.jpg not found, downloading from URL")
-            base_response = requests.get(base_image_url, timeout=5)
-            base_image = Image.open(BytesIO(base_response.content)).convert("RGBA")
-            base_image_rgb = base_image.convert("RGB")
-            base_image_rgb.save("leaderboard.jpg", "JPEG")
-        else:
-            logger.info("Using existing leaderboard.jpg")
-
-        # Load saved image
-        base_image = Image.open("leaderboard.jpg").convert("RGBA")
-
-        # Save final image as PNG
-        temp_file = f"temp_leaderboard_{uuid.uuid4()}.png"
-        base_image.save(temp_file, "PNG")
-        return temp_file
+        ensure_columns_exist()  # Ensure all columns exist before querying
+        conn = sqlite3.connect(DB_PATH, timeout=10)  # Add timeout to prevent DB locking
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                user_id, 
+                IFNULL(username, '') AS username, 
+                IFNULL(first_name, '') AS first_name, 
+                IFNULL(games_played, 0) AS games_played, 
+                IFNULL(wins, 0) AS wins, 
+                IFNULL(losses, 0) AS losses, 
+                IFNULL(rounds_played, 0) AS rounds_played, 
+                IFNULL(eliminations, 0) AS eliminations, 
+                IFNULL(total_score, 0) AS total_score, 
+                IFNULL(penalties, 0) AS penalties
+            FROM users
+            ORDER BY wins DESC, total_score DESC
+            LIMIT 100
+        """)
+        result = cursor.fetchall()
+        conn.close()
+        logger.info(f"Fetched {len(result)} users from database")
+        return result
     except Exception as e:
-        logger.error(f"Error generating leaderboard image: {e}")
-        return None
+        logger.error(f"Error in get_all_users_sorted: {e}")
+        return []
+
+def get_user_rank(user_id):
+    try:
+        all_users = get_all_users_sorted()
+        for idx, row in enumerate(all_users, start=1):
+            if row['user_id'] == user_id:
+                win_percent = round(row['wins'] / row['games_played'] * 100, 1) if row['games_played'] > 0 else 0
+                return {
+                    "username": row['username'] or row['first_name'] or "Unknown",
+                    "rank": idx,
+                    "total_users": len(all_users),
+                    "total_played": row['games_played'],
+                    "wins": row['wins'],
+                    "losses": row['losses'],
+                    "win_percent": win_percent,
+                    "rounds_played": row['rounds_played'],
+                    "eliminations": row['eliminations'],
+                    "total_score": row['total_score'],
+                    "penalties": row['penalties']
+                }
+        return {
+            "username": "Unknown",
+            "rank": len(all_users) + 1,
+            "total_users": len(all_users),
+            "total_played": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_percent": 0,
+            "rounds_played": 0,
+            "eliminations": 0,
+            "total_score": 0,
+            "penalties": 0
+        }
+    except Exception as e:
+        logger.error(f"Error in get_user_rank: {e}")
+        return {
+            "username": "Unknown",
+            "rank": 1,
+            "total_users": 0,
+            "total_played": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_percent": 0,
+            "rounds_played": 0,
+            "eliminations": 0,
+            "total_score": 0,
+            "penalties": 0
+        }
 
 async def generate_leaderboard_task(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
     user_id = update.effective_user.id
@@ -1509,7 +1554,8 @@ async def generate_leaderboard_task(update: Update, context: ContextTypes.DEFAUL
     page = max(1, min(page, total_pages))
     logger.info(f"Total users: {len(all_users)}, Total pages: {total_pages}, Current page: {page}")
 
-    text = "──✦ Player Spotlight ✦──\n\n"
+    # Build caption with proper HTML escaping
+    text = "<b>──✦ Player Spotlight ✦──</b>\n\n"
     user_in_page = False
     user_stats = None
 
@@ -1525,9 +1571,9 @@ async def generate_leaderboard_task(update: Update, context: ContextTypes.DEFAUL
         total_score = row['total_score'] or 0
         penalties = row['penalties'] or 0
         win_percent = round(wins / games_played * 100, 1) if games_played > 0 else 0
-        display_name = row['first_name'] or "Unknown"
+        display_name = html.escape(row['first_name'] or "Unknown")  # Escape to prevent HTML issues
         highlight = "⭐ " if row['user_id'] == user_id else ""
-        text += f"────⊱◈◈◈⊰────\n"
+        text += "<b>────⊱◈◈◈⊰────</b>\n"
         text += f"{i}. {highlight}{display_name}\n"
         text += f"   ⧉ Win%: {win_percent} | 🎮 {games_played}\n"
         text += f"   🏆 {wins} | {losses} Lost\n"
@@ -1551,19 +1597,16 @@ async def generate_leaderboard_task(update: Update, context: ContextTypes.DEFAUL
 
     if not user_in_page:
         user_stats = get_user_rank(user_id)
-        text += f"\n────⊱◈◈◈⊰────\n"
+        text += f"\n<b>────⊱◈◈◈⊰────</b>\n"
         text += f"📌 Your Rank:\n"
-        text += f"{user_stats['rank']}. {user_stats['username']}\n"
+        text += f"{user_stats['rank']}. {html.escape(user_stats['username'])}\n"
         text += f"   ⧉ Win%: {user_stats['win_percent']} | 🎮 {user_stats['total_played']}\n"
         text += f"   🏆 {user_stats['wins']} | {user_stats['losses']} Lost\n"
         text += f"   🔄 Rounds: {user_stats['rounds_played']} | ☠️ Elim: {user_stats['eliminations']}\n"
         text += f"   ⭐ Score: {user_stats['total_score']} | ⛔ Pen: {user_stats['penalties']}\n"
         text += f"   ID: {user_id}\n"
 
-    text += f"────⊱◈◈◈⊰────\nPage {page}/{total_pages}"
-
-    # Updated base image URL
-    base_image_url = "https://graph.org/file/ca04194ed4b8b48eafcab-ab92ca372392f43809.jpg"
+    text += f"<b>────⊱◈◈◈⊰────</b>\nPage {page}/{total_pages}"
 
     keyboard = []
     if total_pages > 1:
@@ -1576,57 +1619,54 @@ async def generate_leaderboard_task(update: Update, context: ContextTypes.DEFAUL
         logger.info(f"Buttons created: {buttons}")
 
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    image_url = "https://graph.org/file/ca04194ed4b8b48eafcab-ab92ca372392f43809.jpg"
 
     try:
         if update.callback_query:
-            logger.info("Editing message with new leaderboard photo")
-            temp_file = await generate_leaderboard_image(user_id, base_image_url, text, context)
-            if temp_file:
-                with open(temp_file, "rb") as photo:
-                    await update.callback_query.message.edit_media(
-                        media=InputMediaPhoto(
-                            media=photo,
-                            caption=text,
-                            parse_mode="HTML"
-                        ),
-                        reply_markup=reply_markup
-                    )
-                os.remove(temp_file)
-            else:
-                await update.callback_query.message.edit_caption(
+            logger.info("Editing message with new leaderboard image and caption")
+            await update.callback_query.message.edit_media(
+                media=InputMediaPhoto(
+                    media=image_url,
                     caption=text,
-                    reply_markup=reply_markup,
                     parse_mode="HTML"
-                )
+                ),
+                reply_markup=reply_markup
+            )
             await update.callback_query.answer()
             logger.info("Callback query answered successfully")
         else:
-            logger.info("Sending new leaderboard photo")
-            temp_file = await generate_leaderboard_image(user_id, base_image_url, text, context)
-            if temp_file:
-                with open(temp_file, "rb") as photo:
-                    await update.message.reply_photo(
-                        photo=photo,
-                        caption=text,
-                        reply_markup=reply_markup,
-                        parse_mode="HTML"
-                    )
-                os.remove(temp_file)
-            else:
-                await update.message.reply_photo(
-                    photo=base_image_url,
-                    caption=text,
+            logger.info("Sending new leaderboard image with caption")
+            await update.message.reply_photo(
+                photo=image_url,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Error in leaderboard: {e}")
+        # Fallback to text-only message to ensure reliability
+        error_message = "⚠️ Failed to send leaderboard image, displaying text instead."
+        try:
+            if update.callback_query:
+                await update.callback_query.message.edit_text(
+                    text=f"{error_message}\n\n{text}",
                     reply_markup=reply_markup,
                     parse_mode="HTML"
                 )
-    except Exception as e:
-        logger.error(f"Error in leaderboard: {e}")
-        error_message = "An error occurred. Please try again."
-        if update.callback_query:
-            await update.callback_query.message.reply_text(error_message)
-            await update.callback_query.answer()
-        else:
-            await update.message.reply_text(error_message)
+                await update.callback_query.answer()
+            else:
+                await update.message.reply_text(
+                    text=f"{error_message}\n\n{text}",
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+        except Exception as fallback_e:
+            logger.error(f"Error in fallback text send: {fallback_e}")
+            if update.callback_query:
+                await update.callback_query.message.reply_text("❌ An error occurred. Please try again later.")
+                await update.callback_query.answer()
+            else:
+                await update.message.reply_text("❌ An error occurred. Please try again later.")
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Leaderboard command received")
@@ -1643,8 +1683,6 @@ async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         except (IndexError, ValueError) as e:
             logger.warning(f"Invalid callback data: {query.data}, error: {e}")
             await query.answer()
-
-
 #users_rank
 
 async def users_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
