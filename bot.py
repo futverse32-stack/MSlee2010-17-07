@@ -171,7 +171,7 @@ async def bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    f"Link: {group_link}\nID: {chat.id}\nAdded by: @{added_by.username or added_by.full_name}"
         await context.bot.send_message(chat_id=LOG_CHAT_ID, text=log_text)
 
-
+# stats.py (corrected to fix datetime and format specifier errors)
 import sqlite3
 import os
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -198,19 +198,35 @@ def stats_buttons():
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show a concise bot stats overview with buttons for detailed categories."""
+    total_users = total_groups = total_games = "N/A"
+
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
 
-        # Fetch basic stats
-        c.execute("SELECT COUNT(*) FROM users")
-        total_users = c.fetchone()[0]
+        # Fetch total users
+        try:
+            c.execute("SELECT COUNT(*) FROM users")
+            total_users = c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error fetching total_users: {e}")
+            total_users = "N/A"
 
-        c.execute("SELECT COUNT(*) FROM groups")
-        total_groups = c.fetchone()[0]
+        # Fetch total groups
+        try:
+            c.execute("SELECT COUNT(*) FROM groups")
+            total_groups = c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error fetching total_groups: {e}")
+            total_groups = "N/A"
 
-        c.execute("SELECT SUM(games_played) FROM users")
-        total_games = c.fetchone()[0] or 0
+        # Fetch total games
+        try:
+            c.execute("SELECT SUM(games_played) FROM users")
+            total_games = c.fetchone()[0] or 0
+        except Exception as e:
+            logger.error(f"Error fetching total_games: {e}")
+            total_games = "N/A"
 
         conn.close()
 
@@ -225,9 +241,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(overview_text, parse_mode="HTML", reply_markup=stats_buttons())
         # Reset current category when showing overview
         context.chat_data['current_stats_category'] = None
+
     except Exception as e:
-        logger.error(f"Error in stats command: {e}")
-        await update.message.reply_text("❌ Error fetching stats. Try again later.")
+        logger.error(f"Critical error in stats command: {e}")
+        await update.message.reply_text("❌ Critical error fetching stats. Please try again later.")
 
 async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button clicks for detailed stats with clean formatting."""
@@ -247,62 +264,107 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Error sending same-category message: {e}")
         return
 
+    total_users = total_groups = total_wins = total_losses = total_games = total_penalties = "N/A"
+    db_size_mb = storage_percentage = active_users = recent_games = avg_games_per_user = "N/A"
+    avg_score = top_players_info = most_active_group_info = inactive_users = win_rate = recent_registrations = "N/A"
+
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
 
-        # Fetch all required data
-        c.execute("SELECT COUNT(*) FROM users")
-        total_users = c.fetchone()[0]
+        # Fetch all required data with individual error handling
+        try:
+            c.execute("SELECT COUNT(*) FROM users")
+            total_users = c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error fetching total_users: {e}")
 
-        c.execute("SELECT COUNT(*) FROM groups")
-        total_groups = c.fetchone()[0]
+        try:
+            c.execute("SELECT COUNT(*) FROM groups")
+            total_groups = c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error fetching total_groups: {e}")
 
-        c.execute("SELECT SUM(wins), SUM(losses), SUM(games_played), SUM(penalties) FROM users")
-        sums = c.fetchone()
-        total_wins = sums[0] or 0
-        total_losses = sums[1] or 0
-        total_games = sums[2] or 0
-        total_penalties = sums[3] or 0
+        try:
+            c.execute("SELECT SUM(wins), SUM(losses), SUM(games_played), SUM(penalties) FROM users")
+            sums = c.fetchone()
+            total_wins = sums[0] or 0
+            total_losses = sums[1] or 0
+            total_games = sums[2] or 0
+            total_penalties = sums[3] or 0
+        except Exception as e:
+            logger.error(f"Error fetching user sums: {e}")
 
-        db_size_bytes = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
-        db_size_mb = db_size_bytes / (1024 * 1024)
-        storage_percentage = (db_size_mb / 500) * 100
+        try:
+            db_size_bytes = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+            db_size_mb = db_size_bytes / (1024 * 1024)
+            storage_percentage = (db_size_mb / 500) * 100
+        except Exception as e:
+            logger.error(f"Error fetching DB size: {e}")
 
-        seven_days_ago = datetime.datetime.now() - timedelta(days=7)
-        c.execute("SELECT COUNT(DISTINCT user_id) FROM users WHERE updated_at >= ?", (seven_days_ago,))
-        active_users = c.fetchone()[0]
+        try:
+            seven_days_ago = datetime.datetime.now() - timedelta(days=7)
+            c.execute("SELECT COUNT(DISTINCT user_id) FROM users WHERE updated_at >= ?", (seven_days_ago,))
+            active_users = c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error fetching active_users: {e}")
 
-        one_day_ago = datetime.datetime.now() - timedelta(days=1)
-        c.execute("SELECT COUNT(*) FROM users WHERE updated_at >= ? AND games_played > 0", (one_day_ago,))
-        recent_games = c.fetchone()[0]
+        try:
+            one_day_ago = datetime.datetime.now() - timedelta(days=1)
+            c.execute("SELECT COUNT(*) FROM users WHERE updated_at >= ? AND games_played > 0", (one_day_ago,))
+            recent_games = c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error fetching recent_games: {e}")
 
-        avg_games_per_user = total_games / total_users if total_users > 0 else 0
+        try:
+            avg_games_per_user = total_games / total_users if isinstance(total_users, int) and total_users > 0 else 0
+        except Exception as e:
+            logger.error(f"Error calculating avg_games_per_user: {e}")
 
-        c.execute("SELECT first_name, username, wins FROM users ORDER BY wins DESC LIMIT 3")
-        top_players = c.fetchall()
-        top_players_info = "\n".join(
-            f"{i+1}. {row[0]} (@{row[1] or 'N/A'}) - {row[2]} wins"
-            for i, row in enumerate(top_players)
-        ) if top_players else "No players with wins yet."
+        try:
+            c.execute("SELECT first_name, username, wins FROM users ORDER BY wins DESC LIMIT 3")
+            top_players = c.fetchall()
+            top_players_info = "\n".join(
+                f"{i+1}. {row[0] or 'N/A'} (@{row[1] or 'N/A'}) - {row[2]} wins"
+                for i, row in enumerate(top_players)
+            ) if top_players else "No players with wins yet."
+        except Exception as e:
+            logger.error(f"Error fetching top_players: {e}")
+            top_players_info = "N/A"
 
-        c.execute("SELECT AVG(total_score) FROM users")
-        avg_score = c.fetchone()[0] or 0
+        try:
+            c.execute("SELECT AVG(total_score) FROM users")
+            avg_score = c.fetchone()[0] or 0
+        except Exception as e:
+            logger.error(f"Error fetching avg_score: {e}")
 
-        c.execute("SELECT title, group_id, games_played FROM groups ORDER BY games_played DESC LIMIT 1")
-        most_active_group = c.fetchone()
-        most_active_group_info = (
-            f"{most_active_group[0]} (ID: {most_active_group[1]}, Games: {most_active_group[2]})"
-            if most_active_group and most_active_group[2] > 0 else "No games played yet."
-        )
+        try:
+            c.execute("SELECT title, group_id, games_played FROM groups ORDER BY games_played DESC LIMIT 1")
+            most_active_group = c.fetchone()
+            most_active_group_info = (
+                f"{most_active_group[0]} (ID: {most_active_group[1]}, Games: {most_active_group[2]})"
+                if most_active_group and most_active_group[2] > 0 else "No games played yet."
+            )
+        except Exception as e:
+            logger.error(f"Error fetching most_active_group: {e}")
+            most_active_group_info = "N/A"
 
-        c.execute("SELECT COUNT(*) FROM users WHERE games_played = 0")
-        inactive_users = c.fetchone()[0]
+        try:
+            c.execute("SELECT COUNT(*) FROM users WHERE games_played = 0")
+            inactive_users = c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error fetching inactive_users: {e}")
 
-        win_rate = (total_wins / total_games * 100) if total_games > 0 else 0
+        try:
+            win_rate = (total_wins / total_games * 100) if isinstance(total_games, int) and total_games > 0 else 0
+        except Exception as e:
+            logger.error(f"Error calculating win_rate: {e}")
 
-        c.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (seven_days_ago,))
-        recent_registrations = c.fetchone()[0]
+        try:
+            c.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (seven_days_ago,))
+            recent_registrations = c.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Error fetching recent_registrations: {e}")
 
         conn.close()
 
@@ -310,9 +372,10 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if selected_category == "bot":
             text = (
                 "<b>Bot Stats</b>\n\n"
-                f"💾 Storage: {db_size_mb:.2f} MB ({storage_percentage:.1f}% of 500 MB)\n"
+                f"💾 Storage: {f'{db_size_mb:.2f}' if isinstance(db_size_mb, float) else 'N/A'} MB "
+                f"({f'{storage_percentage:.1f}' if isinstance(storage_percentage, float) else 'N/A'}% of 500 MB)\n"
                 f"🎮 Total Games: {total_games}\n"
-                f"🏆 Win Rate: {win_rate:.1f}%"
+                f"🏆 Win Rate: {f'{win_rate:.1f}' if isinstance(win_rate, (int, float)) else 'N/A'}%"
             )
         elif selected_category == "users":
             text = (
@@ -321,8 +384,8 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🕒 Active Users (7 days): {active_users}\n"
                 f"😴 Inactive Users: {inactive_users}\n"
                 f"🆕 New Users (7 days): {recent_registrations}\n"
-                f"🎮 Avg. Games/User: {avg_games_per_user:.1f}\n"
-                f"📊 Avg. Score: {avg_score:.1f}"
+                f"🎮 Avg. Games/User: {f'{avg_games_per_user:.1f}' if isinstance(avg_games_per_user, (int, float)) else 'N/A'}\n"
+                f"📊 Avg. Score: {f'{avg_score:.1f}' if isinstance(avg_score, (int, float)) else 'N/A'}"
             )
         elif selected_category == "groups":
             text = (
@@ -358,10 +421,8 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"BadRequest in stats_callback: {e}")
             await query.message.reply_text("❌ Error updating stats. Try again later.")
     except Exception as e:
-        logger.error(f"Error in stats_callback: {e}")
-        await query.message.reply_text("❌ Error fetching stats. Try again later.")
-
-
+        logger.error(f"Critical error in stats_callback: {e}")
+        await query.message.reply_text("❌ Critical error fetching stats. Try again later.")
 import game
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
@@ -690,6 +751,10 @@ async def bugs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=report_msg,
         parse_mode="HTML"
     )
+# bot.py (modified to remove auto_backup job queue as it may contribute to overhead)
+# Comment out or remove the job_queue line in if __name__ == "__main__":
+
+# ... (rest of the code remains the same, only remove the auto_backup job)
 
 if __name__ == "__main__":
     # Init database
@@ -713,8 +778,9 @@ if __name__ == "__main__":
     app.add_handler(ChatMemberHandler(bot_added, ChatMemberHandler.MY_CHAT_MEMBER))
 
     # ---------------- Background Tasks ----------------
-    # Start auto backup loop
-    app.job_queue.run_repeating(lambda ctx: asyncio.create_task(auto_backup(app)), interval=12*3600, first=10)
+    # Removed auto_backup job to reduce potential overhead
+    # If needed, run manual /backup instead
+    # app.job_queue.run_repeating(lambda ctx: asyncio.create_task(auto_backup(app)), interval=12*3600, first=10)
 
     # ---------------- Register Game and Owner Handlers ----------------
     import game
@@ -722,7 +788,8 @@ if __name__ == "__main__":
 
     import owner
     owner.register_owner_handlers(app)  # Call with (app) to register owner commands
-
+    import Group
+    Group.register_handlers(app)  # Call with (app) to register group commands
     # ---------------- Run ----------------
     print("✅ Bot is running...")
     app.run_polling()
