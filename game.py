@@ -133,6 +133,7 @@ def update_user_after_game(user_id: int, score_delta: int, won: bool, rounds_pla
     penalties: total penalties to add
     """
     conn = sqlite3.connect(DB_PATH)
+    ensure_columns_exist()
     c = conn.cursor()
     # ensure row exists
     c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
@@ -211,6 +212,8 @@ class MindScaleGame:
         self.pick_30_alerts: Dict[int, asyncio.Task] = {}  # user_id -> asyncio.Task for 30s alert
         self.score_history: list = []                      # list of per-round results
         self.join_timer_task: Optional[asyncio.Task] = None # Track join phase timer task
+        self.duplicate_rule_sticky: bool = False  # once triggered, stays on each round
+        self._next_round_sticky: bool = False 
 
 
     @property
@@ -239,6 +242,31 @@ class MindScaleGame:
 # -------------------- HELPERS --------------------
 def mention_html(p: Player):
     return f"<a href='tg://user?id={p.user_id}'>{p.name}</a>"
+
+def eval_duplicate_rule(game, picks):
+
+    counts = {}
+    for uid, num in picks:
+        counts[num] = counts.get(num, 0) + 1
+
+    num_alive = len([p for p in game.players.values() if not p.eliminated])
+    num_eliminated = len([p for p in game.players.values() if p.eliminated])
+
+    if num_alive <= 2 and getattr(game, "duplicate_rule_sticky", False):
+        game.duplicate_rule_sticky = False
+
+    triggered_sticky = False
+    if num_eliminated == 0 and any(c >= 4 for c in counts.values()):
+        triggered_sticky = True
+
+    base_active_now = (num_alive > 2 and num_eliminated >= 1)
+    sticky_active_now = getattr(game, "duplicate_rule_sticky", False)
+
+    apply_now = base_active_now or sticky_active_now
+    duplicate_nums = {n for n, c in counts.items() if c > 1} if apply_now else set()
+
+    return apply_now, duplicate_nums, triggered_sticky, counts
+
 
 async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     if group_id not in active_games:
@@ -447,33 +475,26 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
         pass
 
     # -------------------- Duplicate Penalty --------------------
-    num_alive = len(alive_players)
+    apply_dup_now, duplicate_nums, sticky_next, counts = eval_duplicate_rule(game, picks)
+
     duplicate_players = set()
     duplicates_exist = False
-    rule_applied = False
 
-    # Check for 4 or more players picking the same number to activate rule for next round
-    counts = {}
-    for uid, num in picks:
-        counts[num] = counts.get(num, 0) + 1
-    if any(count >= 4 for count in counts.values()):
-        game.next_round_duplicate_active = True  # Schedule duplicate rule for next round
+    # If sticky should start next round, remember it
+    if sticky_next:
+        game._next_round_sticky = True
 
-    # Apply duplicates only if more than 2 alive AND duplicate rule is active
-    if num_alive > 2 and getattr(game, "duplicate_rule_active", False):
-        duplicate_nums = {num for num, count in counts.items() if count >= 4}
-        if duplicate_nums:
-            duplicates_exist = True
-            rule_applied = True
+    if apply_dup_now and duplicate_nums:
+        duplicates_exist = True
         for p in game.active_players:
-            if p.current_number in duplicate_nums:
-                duplicate_players.add(p)
+            if isinstance(p.current_number, (int, float)) and p.current_number in duplicate_nums:
                 p.score -= 1
                 p.total_penalties += 1
+                duplicate_players.add(p)
                 try:
                     await context.bot.send_message(
                         chat_id=group_id,
-                        text=f"⚠️ {mention_html(p)} picked a duplicate number! -1 point penalty.",
+                        text=f"⚠️ {mention_html(p)} picked a duplicate number ({p.current_number})! −1 penalty.",
                         parse_mode="HTML"
                     )
                 except:
@@ -586,6 +607,9 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
     game.current_round_active = False
     game.round_results_sent = False
     game.reset_round_picks()
+    if getattr(game, "_next_round_sticky", False):
+        game.duplicate_rule_sticky = True
+    game._next_round_sticky = False
     for task in list(game.pick_tasks.values()) + list(game.pick_30_alerts.values()):
         try:
             task.cancel()
