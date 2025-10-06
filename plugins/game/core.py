@@ -1,11 +1,9 @@
-# plugins/game/core.py
-import asyncio
-import math
+import asyncio, datetime, sqlite3
 from typing import Dict, Optional
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-from config import DB_PATH, MIN_PLAYERS, MAX_PLAYERS, PICK_TIME_SEC , VIDEO_ELIMINATION, VIDEO_ROUND_ANNOUNCE, VIDEO_WINNER
-from plugins.game.db import ensure_user_exists, update_user_after_game
+from config import PICK_TIME_SEC , VIDEO_ELIMINATION, VIDEO_ROUND_ANNOUNCE, VIDEO_WINNER, DB_PATH
+from plugins.game.db import ensure_user_exists, update_user_after_game, record_group_game_end
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,13 +38,15 @@ class MindScaleGame:
         self.round_number: int = 0
         self.current_round_active: bool = False
         self.pick_tasks: Dict[int, asyncio.Task] = {}
+        self.pick_60_alerts: Dict[int, asyncio.Task] = {}
         self.pick_30_alerts: Dict[int, asyncio.Task] = {}
+        self.pick_10_alerts: Dict[int, asyncio.Task] = {}
         self.score_history: list = []
         self.join_timer_task: Optional[asyncio.Task] = None
         self.round_results_sent: bool = False
-        self.duplicate_rule_active: bool = False
-        self.next_round_duplicate_active: bool = False
         self.ended: bool = False
+        self.duplicate_rule_sticky: bool = False
+        self._next_round_sticky: bool = False 
 
     @property
     def active_players(self):
@@ -70,6 +70,30 @@ class MindScaleGame:
 def mention_html(p: Player):
     return f"<a href='tg://user?id={p.user_id}'>{p.name}</a>"
 
+def eval_duplicate_rule(game, picks):
+
+    counts = {}
+    for uid, num in picks:
+        counts[num] = counts.get(num, 0) + 1
+
+    num_alive = len([p for p in game.players.values() if not p.eliminated])
+    num_eliminated = len([p for p in game.players.values() if p.eliminated])
+
+    if num_alive <= 2 and getattr(game, "duplicate_rule_sticky", False):
+        game.duplicate_rule_sticky = False
+
+    triggered_sticky = False
+    if num_eliminated == 0 and any(c >= 4 for c in counts.values()):
+        triggered_sticky = True
+
+    base_active_now = (num_alive > 2 and num_eliminated >= 1)
+    sticky_active_now = getattr(game, "duplicate_rule_sticky", False)
+
+    apply_now = base_active_now or sticky_active_now
+    duplicate_nums = {n for n, c in counts.items() if c > 1} if apply_now else set()
+
+    return apply_now, duplicate_nums, triggered_sticky, counts
+
 async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     if group_id not in active_games:
         return
@@ -83,26 +107,17 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     game.round_results_sent = False
 
     # Cancel old tasks
-    for t in list(game.pick_tasks.values()) + list(game.pick_30_alerts.values()):
+    for t in list(game.pick_tasks.values()) + list(game.pick_30_alerts.values()) + list(game.pick_60_alerts.values()) + list(game.pick_10_alerts.values()):  # (MODIFIED)
         try:
             t.cancel()
         except:
             pass
     game.pick_tasks.clear()
     game.pick_30_alerts.clear()
+    game.pick_60_alerts.clear()   
+    game.pick_10_alerts.clear()  
 
-    # Duplicate rule notice
-    if getattr(game, "duplicate_rule_active", False):
-        try:
-            await context.bot.send_message(
-                chat_id=group_id,
-                text="⚠️ Duplicate penalty rule is active this round! Picking the same number as 3 or more other players will result in a -1 point penalty.",
-                parse_mode="HTML"
-            )
-        except:
-            pass
-
-    # announce round (video or text)
+    # -------------------- Round start announcement --------------------
     bot_username = (await context.bot.get_me()).username or ""
     dm_url = f"https://t.me/{bot_username}"
     buttons = InlineKeyboardMarkup([[InlineKeyboardButton("Send number in DM", url=dm_url)]])
@@ -123,6 +138,7 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         except:
             pass
 
+    # -------------------- Check active players --------------------
     players = game.active_players
     if not players:
         try:
@@ -132,6 +148,23 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         await end_game(context, group_id)
         return
 
+    # -------------------- helpers (NEW) --------------------
+    async def send_alert(user_id: int, secs_left: int):
+        if group_id not in active_games or user_id not in game.players:
+            return
+        p = game.players.get(user_id)
+        if not p or p.eliminated or p.current_number is not None:
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=f"⏳ {mention_html(p)} — {secs_left} seconds left to send your number in DM!",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+    # -------------------- Per-player DM and timers --------------------
     async def handle_miss(user_id: int):
         if group_id not in active_games or user_id not in game.players:
             return
@@ -139,6 +172,7 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         if not p or p.eliminated or p.current_number is not None:
             return
 
+        # ---------------- Inactivity Penalty Logic ----------------
         if getattr(p, "timeout_count", 0) == 0:
             p.score -= 1
             p.total_penalties += 1
@@ -157,24 +191,19 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
 
         game.pick_tasks.pop(user_id, None)
         game.pick_30_alerts.pop(user_id, None)
+        game.pick_60_alerts.pop(user_id, None)  
+        game.pick_10_alerts.pop(user_id, None)   
 
         if group_id in active_games and all(pl.current_number is not None or pl.eliminated for pl in game.active_players):
             game.current_round_active = False
             await process_round_results(context, group_id)
 
-    async def send_30_alert(user_id: int):
-        if group_id not in active_games or user_id not in game.players:
-            return
-        p = game.players.get(user_id)
-        if not p or p.eliminated or p.current_number is not None:
-            return
-        try:
-            await context.bot.send_message(chat_id=group_id, text=f"⏳ {mention_html(p)} — 30 seconds left to send your number in DM!", parse_mode="HTML")
-        except:
-            pass
+    async def send_30_alert(user_id: int):  # kept for minimal disruption; now uses helper
+        await send_alert(user_id, 30)
 
     for p in players:
-        if p.eliminated: continue
+        if p.eliminated:
+            continue
         # DM instruction
         try:
             await context.bot.send_message(chat_id=p.user_id, text=f"🎯 𝗥𝗼𝘂𝗻𝗱 {game.round_number} \nSend a number between 0–100 .")
@@ -184,12 +213,32 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
             except:
                 pass
 
-        async def _alert(uid=p.user_id):
-            await asyncio.sleep(PICK_TIME_SEC - 30)
-            await send_30_alert(uid)
-        t30 = asyncio.create_task(_alert())
-        game.pick_30_alerts[p.user_id] = t30
+        # schedule alerts & timeout
+        # 60s alert (only if PICK_TIME_SEC > 60)
+        if PICK_TIME_SEC > 60:
+            async def _alert60(uid=p.user_id):
+                await asyncio.sleep(PICK_TIME_SEC - 60)
+                await send_alert(uid, 60)
+            t60 = asyncio.create_task(_alert60())
+            game.pick_60_alerts[p.user_id] = t60
 
+        # 30s alert (existing behavior, kept)
+        if PICK_TIME_SEC > 30:
+            async def _alert30(uid=p.user_id):
+                await asyncio.sleep(PICK_TIME_SEC - 30)
+                await send_30_alert(uid)
+            t30 = asyncio.create_task(_alert30())
+            game.pick_30_alerts[p.user_id] = t30
+
+        # 10s alert
+        if PICK_TIME_SEC > 10:
+            async def _alert10(uid=p.user_id):
+                await asyncio.sleep(PICK_TIME_SEC - 10)
+                await send_alert(uid, 10)
+            t10 = asyncio.create_task(_alert10())
+            game.pick_10_alerts[p.user_id] = t10
+
+        # timeout as before
         async def _timeout(uid=p.user_id):
             await asyncio.sleep(PICK_TIME_SEC)
             await handle_miss(uid)
@@ -231,28 +280,41 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
         pass
 
     # Duplicate detection & next-round scheduling
-    num_alive = len(alive_players)
-    counts = {}
-    for uid, num in picks:
-        counts[num] = counts.get(num, 0) + 1
-    if any(count >= 4 for count in counts.values()):
-        game.next_round_duplicate_active = True
+    apply_dup_now, duplicate_nums, sticky_next, counts = eval_duplicate_rule(game, picks)
 
     duplicate_players = set()
     duplicates_exist = False
-    rule_applied = False
-    if num_alive > 2 and getattr(game, "duplicate_rule_active", False):
-        duplicate_nums = {num for num, count in counts.items() if count >= 4}
-        if duplicate_nums:
-            duplicates_exist = True
-            rule_applied = True
+
+    # If sticky should start next round, remember it
+    if sticky_next:
+        game._next_round_sticky = True
+        try:
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=(
+                    f"⚠️ <u>𝐃𝐮𝐩𝐥𝐢𝐜𝐚𝐭𝐞 𝐓𝐫𝐢𝐠𝐠𝐞𝐫</u> ⚠️\n"
+                    f"➡️ 4 or more players chose the same number.\n"
+                    f"🔒 From the <b>next round</b>, duplicate penalty will be <b>ACTIVE</b> for "
+                    f"<b>any</b> duplicate numbers."
+                ),
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+    if apply_dup_now and duplicate_nums:
+        duplicates_exist = True
         for p in game.active_players:
-            if p.current_number in duplicate_nums:
-                duplicate_players.add(p)
+            if isinstance(p.current_number, (int, float)) and p.current_number in duplicate_nums:
                 p.score -= 1
                 p.total_penalties += 1
+                duplicate_players.add(p)
                 try:
-                    await context.bot.send_message(chat_id=group_id, text=f"⚠️ {mention_html(p)} picked a duplicate number! -1 point penalty.", parse_mode="HTML")
+                    await context.bot.send_message(
+                        chat_id=group_id,
+                        text=f"⚠️ {mention_html(p)} picked a duplicate number ({p.current_number})! −1 penalty.",
+                        parse_mode="HTML"
+                    )
                 except:
                     pass
 
@@ -312,8 +374,6 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
         if not p.eliminated and p.score <= -10:
             p.eliminated = True
             eliminated_now.append(p)
-    if eliminated_now and num_eliminated == 0:
-        game.next_round_duplicate_active = True
 
     # Round results message
     res = f"𝗥𝗼𝘂𝗻𝗱 {game.round_number} 𝗥𝗲𝘀𝘂𝗹𝘁𝘀 \n\n"
@@ -324,8 +384,10 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
             res += f"👑 Winner{'s' if len(winner_players) > 1 else ''}: {winner_names}\n\n"
     res += "📊 Scores:\n"
     for p in sorted(game.players.values(), key=lambda x: -x.score):
-        status = " (Eliminated)" if p.eliminated else ""
-        res += f"♦️ {mention_html(p)} — {p.score}{status}\n"
+        if p.eliminated :
+            res += f"♦️ {p.name} — {p.score} (Eliminated) \n"
+        else:
+            res += f"♦️ {mention_html(p)} — {p.score}\n"
     res += " Keep pushing, the next round awaits! 🚀"
     try:
         await context.bot.send_message(chat_id=group_id, text=res, parse_mode="HTML")
@@ -350,6 +412,9 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
     game.current_round_active = False
     game.round_results_sent = False
     game.reset_round_picks()
+    if getattr(game, "_next_round_sticky", False):
+        game.duplicate_rule_sticky = True
+    game._next_round_sticky = False
     for task in list(game.pick_tasks.values()) + list(game.pick_30_alerts.values()):
         try:
             task.cancel()
@@ -357,9 +422,6 @@ async def process_round_results(context: ContextTypes.DEFAULT_TYPE, group_id: in
             pass
     game.pick_tasks.clear()
     game.pick_30_alerts.clear()
-
-    game.duplicate_rule_active = getattr(game, "next_round_duplicate_active", False)
-    game.next_round_duplicate_active = False
 
     asyncio.create_task(start_round(context, group_id))
 
@@ -454,23 +516,6 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         return
     game.ended = True
 
-    # increment games_played in DB (best-effort)
-    try:
-        conn = __import__("sqlite3").connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT group_id FROM groups WHERE group_id = ?", (group_id,))
-        if not c.fetchone():
-            c.execute("INSERT INTO groups (group_id, title, games_played) VALUES (?, ?, 0)", (group_id, "Unknown Group"))
-        c.execute("UPDATE groups SET games_played = COALESCE(games_played,0) + 1 WHERE group_id = ?", (group_id,))
-        conn.commit()
-    except Exception:
-        logger.exception("Failed to update games_played")
-    finally:
-        try:
-            conn.close()
-        except:
-            pass
-
     players_sorted = sorted(game.players.values(), key=lambda p: -getattr(p, "score", 0)) if hasattr(game, "players") else []
 
     text = "『 𝗙𝗶𝗻𝗮𝗹 𝗦𝗰𝗼𝗿𝗲𝗰𝗮𝗿𝗱 』\n"
@@ -493,6 +538,51 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         winner_name = getattr(winner, "name", "Unknown")
         winner_id = getattr(winner, "user_id", None)
         text += f"🎉 Champion: <a href='tg://user?id={winner_id}'>{winner_name}</a> 🏆\n"
+
+    # --- Per-game rollup for group stats ---
+    try:
+        try:
+            chat_obj = await context.bot.get_chat(group_id)
+            group_title = getattr(chat_obj, "title", None) or "Unknown Group"
+        except Exception:
+            group_title = "Unknown Group"
+
+        # Build payloads from current game state
+        all_player_ids = list(game.players.keys())
+        winner_ids = [winner.user_id] if winner else []
+
+        # Use per-game totals as deltas for this finished game
+        scores_delta_dict = {p.user_id: int(getattr(p, "score", 0)) for p in game.players.values()}
+        elim_delta_dict = {p.user_id: (1 if getattr(p, "eliminated", False) else 0) for p in game.players.values()}
+        penalty_delta_dict = {p.user_id: int(getattr(p, "total_penalties", 0)) for p in game.players.values()}
+
+        user_names = {
+            p.user_id: (getattr(p, "name", None), getattr(p, "username", None))
+            for p in game.players.values()
+        }
+
+        record_group_game_end(
+            group_id=group_id,
+            group_title=group_title,
+            players=all_player_ids,
+            winners=winner_ids,
+            scores=scores_delta_dict,
+            elim_counts=elim_delta_dict,
+            penalty_counts=penalty_delta_dict,
+            user_names=user_names,
+        )
+    except Exception:
+        logger.exception("Failed to record per-group game summary")
+
+    try:
+        now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        c = conn.cursor()
+        c.execute("INSERT INTO games (group_id, ended_at) VALUES (?, ?)", (group_id, now_utc))
+        conn.commit()
+        conn.close()
+    except Exception:
+        logger.exception("Failed to insert row into games")
 
     async def send_scorecard():
         try:
@@ -526,7 +616,7 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     loop.call_later(1, lambda: asyncio.create_task(send_winner_announcement()))
     loop.call_later(2, lambda: asyncio.create_task(send_new_game_notification()))
 
-    # Save user stats
+    # Save user stats (global)
     for p in players_sorted:
         try:
             user_obj = type("U", (), {
@@ -546,23 +636,41 @@ async def end_game(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         except Exception:
             logger.exception("Failed to update stats for user %s", getattr(p, "user_id", None))
 
+    # Clear user→game mapping
     for p in players_sorted:
         user_active_game.pop(getattr(p, "user_id", None), None)
 
-    # cancel tasks
+    # cancel tasks (include 60s and 10s alerts too)
     for t in list(getattr(game, "pick_tasks", {}).values()):
         try:
-            if t and not t.done(): t.cancel()
+            if t and not t.done():
+                t.cancel()
         except:
             pass
     for t in list(getattr(game, "pick_30_alerts", {}).values()):
         try:
-            if t and not t.done(): t.cancel()
+            if t and not t.done():
+                t.cancel()
+        except:
+            pass
+    for t in list(getattr(game, "pick_60_alerts", {}).values()):
+        try:
+            if t and not t.done():
+                t.cancel()
+        except:
+            pass
+    for t in list(getattr(game, "pick_10_alerts", {}).values()):
+        try:
+            if t and not t.done():
+                t.cancel()
         except:
             pass
 
     getattr(game, "pick_tasks", {}).clear()
     getattr(game, "pick_30_alerts", {}).clear()
+    getattr(game, "pick_60_alerts", {}).clear()
+    getattr(game, "pick_10_alerts", {}).clear()
 
     active_games.pop(group_id, None)
     logger.debug("Game ended and cleaned up for group %s", group_id)
+

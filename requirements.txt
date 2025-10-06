@@ -1,5 +1,7 @@
-python-telegram-bot==20.6
-python-telegram-bot[job-queue]==20.6
+python-telegram-bot==22.5
+python-telegram-bot[job-queue]==22.5
 aiofiles==23.1.0
-Pillow==10.1.0
+Pillow==11.3.0
 requests
+pyrofork
+TgCrypto-pyrofork

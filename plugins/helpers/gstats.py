@@ -1,56 +1,48 @@
-# plugins/helpers/gstats.py
 import sqlite3
 import logging
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from config import DB_PATH
 import html
 
 logger = logging.getLogger(__name__)
 
 def group_stats_buttons():
-    """Generate inline buttons for group stats categories."""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📊 Overview", callback_data="gstats_overview"),
             InlineKeyboardButton("🌟 Top Players", callback_data="gstats_top_players"),
         ],
-        [
-            InlineKeyboardButton("🕒 Activity", callback_data="gstats_activity"),
-        ],
+        [ InlineKeyboardButton("🕒 Activity", callback_data="gstats_activity") ],
     ])
 
 async def gstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show group-specific stats with buttons for detailed categories."""
     chat = update.effective_chat
     if chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("❌ This command can only be used in groups.")
         return
 
     group_id = chat.id
-    total_games = total_users = "N/A"
+    total_games = 0
+    total_users = 0
 
     try:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
 
-        # Fetch group games played
-        try:
-            c.execute("SELECT games_played FROM groups WHERE group_id = ?", (group_id,))
-            result = c.fetchone()
-            total_games = result[0] if result else 0
-        except Exception as e:
-            logger.error(f"Error fetching total_games for group {group_id}: {e}")
-            total_games = "N/A"
+        # Per-group games played
+        c.execute("SELECT COALESCE(games_played,0) FROM groups WHERE group_id=?", (group_id,))
+        row = c.fetchone()
+        total_games = row[0] if row else 0
 
-        # Fetch number of users in the group (approximation: players with any games_played)
-        try:
-            c.execute("SELECT COUNT(DISTINCT user_id) FROM users WHERE games_played > 0")
-            total_users = c.fetchone()[0]
-        except Exception as e:
-            logger.error(f"Error fetching total_users for group {group_id}: {e}")
-            total_users = "N/A"
+        # Distinct players who have played in THIS group
+        c.execute("""
+            SELECT COUNT(DISTINCT user_id)
+            FROM user_group_stats
+            WHERE group_id=? AND games_played>0
+        """, (group_id,))
+        total_users = c.fetchone()[0] or 0
 
         conn.close()
 
@@ -67,104 +59,102 @@ async def gstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.chat_data['current_gstats_category'] = None
 
     except Exception as e:
-        logger.error(f"Critical error in gstats command for group {group_id}: {e}")
+        logger.exception(f"Critical error in gstats for group {group_id}: {e}")
         await update.message.reply_text("❌ Critical error fetching group stats. Try again later.")
 
 async def gstats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks for detailed group stats."""
     query = update.callback_query
     await query.answer()
 
     chat = update.effective_chat
     if chat.type not in ["group", "supergroup"]:
-        await query.message.reply_text("❌ This command can only be used in groups.")
+        await query.answer("❌ This command can only be used in groups.")
         return
 
     group_id = chat.id
     selected_category = query.data.replace("gstats_", "")
 
-    # Check if the selected category is already displayed
     current_category = context.chat_data.get('current_gstats_category')
     if current_category == selected_category:
-        logger.debug(f"User attempted to view same gstats category: {selected_category}")
         try:
-            await query.message.reply_text("ℹ️ You're already viewing this stats category.")
+            await query.answer("ℹ️ You're already viewing this stats category.")
         except Exception as e:
-            logger.error(f"Error sending same-category message: {e}")
+            logger.error(f"Same-category reply failed: {e}")
         return
 
-    total_games = total_users = win_rate = active_users = total_eliminations = total_penalties = "N/A"
-    top_players_info = most_recent_game = "N/A"
+    # Defaults
+    total_games = total_users = 0
+    win_rate = 0.0
+    active_users = 0
+    total_eliminations = total_penalties = 0
+    top_players_info = "No players with games yet."
+    most_recent_game = "No recent games"
 
     try:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         c = conn.cursor()
 
-        # Fetch group games played
-        try:
-            c.execute("SELECT games_played FROM groups WHERE group_id = ?", (group_id,))
-            result = c.fetchone()
-            total_games = result[0] if result else 0
-        except Exception as e:
-            logger.error(f"Error fetching total_games for group {group_id}: {e}")
+        # Overview
+        c.execute("SELECT COALESCE(games_played,0), last_game_at FROM groups WHERE group_id=?", (group_id,))
+        row = c.fetchone()
+        if row:
+            total_games = row[0] or 0
+            most_recent_game = row[1] or "No recent games"
 
-        # Fetch total users (players with games_played > 0)
-        try:
-            c.execute("SELECT COUNT(DISTINCT user_id) FROM users WHERE games_played > 0")
-            total_users = c.fetchone()[0]
-        except Exception as e:
-            logger.error(f"Error fetching total_users for group {group_id}: {e}")
+        c.execute("""
+            SELECT COUNT(DISTINCT user_id)
+            FROM user_group_stats
+            WHERE group_id=? AND games_played>0
+        """, (group_id,))
+        total_users = c.fetchone()[0] or 0
 
-        # Fetch win rate (average of user win percentages)
-        try:
-            c.execute("SELECT SUM(wins), SUM(games_played) FROM users WHERE games_played > 0")
-            sums = c.fetchone()
-            total_wins = sums[0] or 0
-            total_games_played = sums[1] or 0
-            win_rate = (total_wins / total_games_played * 100) if total_games_played > 0 else 0
-        except Exception as e:
-            logger.error(f"Error fetching win_rate for group {group_id}: {e}")
+        # Win rate = total wins / total games played (in this group)
+        c.execute("""
+            SELECT COALESCE(SUM(wins),0), COALESCE(SUM(games_played),0)
+            FROM user_group_stats
+            WHERE group_id=? AND games_played>0
+        """, (group_id,))
+        total_wins, total_gp = c.fetchone()
+        win_rate = (total_wins / total_gp * 100.0) if total_gp > 0 else 0.0
 
-        # Fetch active users (played in last 7 days)
-        try:
-            seven_days_ago = datetime.now() - timedelta(days=7)
-            c.execute("SELECT COUNT(DISTINCT user_id) FROM users WHERE updated_at >= ? AND games_played > 0", (seven_days_ago,))
-            active_users = c.fetchone()[0]
-        except Exception as e:
-            logger.error(f"Error fetching active_users for group {group_id}: {e}")
+        # Active users in last 7 days (based on updated_at, stored as UTC "YYYY-mm-dd HH:MM:SS")
+        now_utc = datetime.now(timezone.utc)
+        seven_days_ago = (now_utc - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""
+            SELECT COUNT(DISTINCT user_id)
+            FROM user_group_stats
+            WHERE group_id=? AND updated_at IS NOT NULL AND updated_at >= ? AND games_played>0
+        """, (group_id, seven_days_ago))
+        active_users = c.fetchone()[0] or 0
 
-        # Fetch total eliminations and penalties
-        try:
-            c.execute("SELECT SUM(eliminations), SUM(penalties) FROM users WHERE games_played > 0")
-            sums = c.fetchone()
-            total_eliminations = sums[0] or 0
-            total_penalties = sums[1] or 0
-        except Exception as e:
-            logger.error(f"Error fetching eliminations/penalties for group {group_id}: {e}")
+        # Totals for eliminations/penalties
+        c.execute("""
+            SELECT COALESCE(SUM(eliminations),0), COALESCE(SUM(penalties),0)
+            FROM user_group_stats
+            WHERE group_id=? AND games_played>0
+        """, (group_id,))
+        total_eliminations, total_penalties = c.fetchone()
 
-        # Fetch top 3 players
-        try:
-            c.execute("SELECT first_name, username, wins, total_score FROM users WHERE games_played > 0 ORDER BY wins DESC, total_score DESC LIMIT 3")
-            top_players = c.fetchall()
-            top_players_info = "\n".join(
-                f"{i+1}. {html.escape(row[0] or 'N/A')} (@{html.escape(row[1] or 'N/A')}) - {row[2]} wins, {row[3]} score"
-                for i, row in enumerate(top_players)
-            ) if top_players else "No players with games yet."
-        except Exception as e:
-            logger.error(f"Error fetching top_players for group {group_id}: {e}")
-            top_players_info = "N/A"
-
-        # Fetch most recent game timestamp
-        try:
-            c.execute("SELECT MAX(updated_at) FROM users WHERE games_played > 0")
-            result = c.fetchone()
-            most_recent_game = result[0] if result and result[0] else "No recent games"
-        except Exception as e:
-            logger.error(f"Error fetching most_recent_game for group {group_id}: {e}")
+        # Top 3 players by wins then score within THIS group
+        c.execute("""
+            SELECT first_name, username, wins, total_score
+            FROM user_group_stats
+            WHERE group_id=? AND games_played>0
+            ORDER BY wins DESC, total_score DESC
+            LIMIT 3
+        """, (group_id,))
+        rows = c.fetchall()
+        if rows:
+            parts = []
+            for i, (fn, un, w, sc) in enumerate(rows, start=1):
+                name = html.escape(fn or "Player")
+                at = f"@{html.escape(un)}" if un else ""
+                parts.append(f"{i}. {name} {at} - {w} wins, {sc} score")
+            top_players_info = "\n".join(parts)
 
         conn.close()
 
-        # Prepare response based on category
+        # Compose output
         if selected_category == "overview":
             text = (
                 "<b>Group Stats - Overview</b>\n\n"
@@ -172,7 +162,7 @@ async def gstats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🆔 ID: {group_id}\n"
                 f"🎮 Games Played: {total_games}\n"
                 f"👥 Players: {total_users}\n"
-                f"🏆 Win Rate: {f'{win_rate:.1f}' if isinstance(win_rate, (int, float)) else 'N/A'}%"
+                f"🏆 Win Rate: {win_rate:.1f}%"
             )
         elif selected_category == "top_players":
             text = (
@@ -191,11 +181,10 @@ async def gstats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "❌ Unknown category"
 
-        # Update message and store current category
         await query.edit_message_text(text=text, parse_mode="HTML", reply_markup=group_stats_buttons())
         context.chat_data['current_gstats_category'] = selected_category
-        logger.debug(f"Displayed gstats category: {selected_category}")
 
     except Exception as e:
-        logger.error(f"Critical error in gstats_callback for group {group_id}: {e}")
-        await query.message.reply_text("❌ Critical error fetching group stats. Try again later.")
+        logger.exception(f"Critical error in gstats_callback for group {group_id}: {e}")
+        await query.answer("❌ Critical error fetching group stats. Try again later.")
+

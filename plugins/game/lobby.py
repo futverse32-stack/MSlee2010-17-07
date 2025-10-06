@@ -1,11 +1,12 @@
-# plugins/game/lobby.py
 import asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, filters
 from plugins.game.core import MindScaleGame, active_games, user_active_game, start_round, mention_html
-from plugins.game.db import ensure_user_exists, ensure_group_exists, ensure_columns_exist
+from plugins.game.db import ensure_user_exists, ensure_group_exists, ensure_columns_exist, update_user_after_game
 from config import JOIN_TIME_SEC, MIN_PLAYERS, MAX_PLAYERS
-import logging
+from plugins.helpers.leaderboard import get_user_rank
+from plugins.helpers.notify import notify_on_new_game
+import logging, time
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,14 @@ async def startgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo="https://graph.org/file/79186f4d926011e1fb8e8-a9c682050a7a3539ed.jpg",
         caption="🎲 Mind Scale Game\n\nChoose game mode:",
         reply_markup=buttons
+    )
+
+    invite_link = (await context.bot.export_chat_invite_link(group_id))  # if group is private
+    await notify_on_new_game(
+        context,
+        group_id=update.effective_chat.id,
+        group_title=update.effective_chat.title,
+        group_invite_link=invite_link
     )
 
 async def mode_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -64,28 +73,41 @@ async def join_phase_scheduler(context: ContextTypes.DEFAULT_TYPE, group_id: int
         return
     game = active_games[group_id]
 
+    game.join_deadline = time.monotonic() + JOIN_TIME_SEC
+
     async def schedule_alert(delay, seconds_left):
         await asyncio.sleep(delay)
-        if group_id in active_games and active_games[group_id].join_phase_active:
-            await context.bot.send_message(chat_id=group_id, text=f"⏱ Hurry up! Only {seconds_left} seconds left to /join the game!")
+        if (group_id in active_games and
+            active_games[group_id].join_phase_active and
+            getattr(active_games[group_id], "join_deadline", 0) == game.join_deadline):
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=f"⏱ Hurry up! Only {seconds_left} seconds left to /join the game!"
+            )
 
     tasks = []
-    for sec in [60, 30, 10]:
+    for sec in [120, 60, 30, 10]:
         delay = max(0, JOIN_TIME_SEC - sec)
         tasks.append(asyncio.create_task(schedule_alert(delay, sec)))
+    game.alert_tasks = tasks
 
     game.join_timer_task = asyncio.create_task(asyncio.sleep(JOIN_TIME_SEC))
-    try:
-        await game.join_timer_task
-    except asyncio.CancelledError:
-        pass
+
+    while True:
+        try:
+            await game.join_timer_task         
+            break                                
+        except asyncio.CancelledError:
+            if not (group_id in active_games and game.join_phase_active):
+                return 
+            continue
+
+    for t in game.alert_tasks or []:
+        if t and not t.done():
+            t.cancel()
 
     if group_id in active_games:
         await end_join_phase(context, group_id)
-
-    for t in tasks:
-        if not t.done():
-            t.cancel()
 
 async def end_join_phase(context: ContextTypes.DEFAULT_TYPE, group_id: int):
     if group_id not in active_games:
@@ -115,6 +137,78 @@ async def end_join_phase(context: ContextTypes.DEFAULT_TYPE, group_id: int):
 
     await context.bot.send_message(chat_id=group_id, text=(f"『 𝗠𝗮𝘁𝗰𝗵 𝗦𝗲𝘁𝘁𝗹𝗲𝗱 』\n\n🎲 Players Joined ({len(game.players)}):\n{players_list}\n\n⊱⋅ ─────────── ⋅⊰\n\n✧ Brace yourselves! The game is about to begin! 🚀"), parse_mode="HTML")
     await start_round(context, group_id)
+
+async def extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_chat.type not in (filters.ChatType.GROUP, filters.ChatType.SUPERGROUP, 'group', 'supergroup'):
+        await update.message.reply_text("❌ /extend can only be used in groups!")
+        return
+
+    group_id = update.effective_chat.id
+
+    game = active_games.get(group_id)
+    if not game or not getattr(game, "join_phase_active", False):
+        await update.message.reply_text("⚠️ No join phase is active right now.")
+        return
+
+    try:
+        extra = int(context.args[0]) if context.args else 30
+    except (ValueError, IndexError):
+        extra = 30
+
+    if extra <= 0:
+        await update.message.reply_text("⚠️ Please provide a positive number of seconds.")
+        return
+    if extra > 240:
+        await update.message.reply_text("⚠️ Maximum extension is 4 minutes.")
+        return
+
+    now = time.monotonic()
+
+    if not hasattr(game, "join_deadline"):
+        game.join_deadline = now
+    remaining = max(0, int(game.join_deadline - now))
+
+    # New total time from now
+    new_total = remaining + extra
+    new_deadline = now + new_total
+
+    if getattr(game, "join_timer_task", None) and not game.join_timer_task.done():
+        game.join_timer_task.cancel()
+
+    for t in getattr(game, "alert_tasks", []) or []:
+        if t and not t.done():
+            t.cancel()
+
+    new_alerts = []
+    async def schedule_alert(delay, seconds_left):
+        await asyncio.sleep(delay)
+        if group_id in active_games and active_games[group_id].join_phase_active and active_games[group_id].join_deadline == new_deadline:
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=f"⏱ Hurry up! Only {seconds_left} seconds left to /join the game!"
+            )
+
+    for sec in [120, 60, 30, 10]:
+        delay = max(0, new_total - sec)
+        new_alerts.append(asyncio.create_task(schedule_alert(delay, sec)))
+    game.alert_tasks = new_alerts
+
+    game.join_timer_task = asyncio.create_task(asyncio.sleep(new_total))
+    game.join_deadline = new_deadline
+
+    def fmt(sec: int) -> str:
+        m, s = divmod(sec, 60)
+        if m and s:
+            return f"{m}m {s}s"
+        if m:
+            return f"{m}m"
+        return f"{s}s"
+
+    await update.message.reply_text(
+        f"✅ Join phase extended by {fmt(extra)}.\n"
+        f"🕒 Time remaining: {fmt(new_total)}."
+    )
 
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
@@ -252,20 +346,20 @@ async def confirm_endmatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 self.username = username
         u = UserObj(p.user_id, p.name, p.username)
         ensure_user_exists(u)
-        # update_user_after_game(
-        #     user_id=p.user_id,
-        #     score_delta=getattr(p, "total_score", p.score),
-        #     rounds_played=getattr(p, "rounds_played", 0),
-        #     eliminated=getattr(p, "eliminated", False),
-        #     penalties=getattr(p, "total_penalties", 0),
-        #     won=False
-        # )
+        update_user_after_game(
+            user_id=p.user_id,
+            score_delta=getattr(p, "total_score", p.score),
+            rounds_played=getattr(p, "rounds_played", 0),
+            eliminated=getattr(p, "eliminated", False),
+            penalties=getattr(p, "total_penalties", 0),
+            won=False
+        )
 
     for p in game.players.values():
         user_active_game.pop(p.user_id, None)
 
     del active_games[group_id]
-    await query.edit_message_text(" ✅ 𝗚𝗮𝗺𝗲 𝗘𝗻𝗱𝗲𝗱 \n\n☑️ Game ended by admin.\n⏳ All timers cleared.")
+    await query.edit_message_text(f" ✅ 𝗚𝗮𝗺𝗲 𝗘𝗻𝗱𝗲𝗱 \n\n☑️ Game ended by admin {user.first_name}.\n⏳ All timers cleared.")
 
 async def forcestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -325,53 +419,7 @@ async def forcestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game.join_phase_active = False
     await context.bot.send_message(
         chat_id=group_id,
-        text=f"🚀 𝗙𝗼𝗿𝗰𝗲 𝗦𝘁𝗮𝗿𝘁\n\n✅ Admin has started the game early!"
+        text=f"🚀 𝗙𝗼𝗿𝗰𝗲 𝗦𝘁𝗮𝗿𝘁\n\n✅ Admin - {user.first_name} has started the game early!"
     )
     await end_join_phase(context, group_id)
 
-async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    ensure_columns_exist()
-    import sqlite3
-    conn = sqlite3.connect(__import__("config").DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        SELECT first_name, username,
-               IFNULL(games_played,0),
-               IFNULL(wins,0),
-               IFNULL(losses,0),
-               IFNULL(rounds_played,0),
-               IFNULL(eliminations,0),
-               IFNULL(total_score,0),
-               IFNULL(last_score,0),
-               IFNULL(penalties,0)
-        FROM users
-        WHERE user_id = ?
-    """, (user.id,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        await update.message.reply_text("❌ No stats found. Play a game first!")
-        return
-    first_name, username, games_played, wins, losses, rounds_played, eliminations, total_score, last_score, penalties = row
-    win_pct = (wins / games_played * 100) if games_played else 0
-    display_name = f"@{username}" if username else first_name
-    msg = f"""
-──✦ 𝗣𝗹𝗮𝘆𝗲𝗿 𝗦𝘁𝗮𝘁𝘀 ✦──
-𓆩⌬ ‹{display_name}›𓆪
-
-🎮 Games Played: {games_played}
-🥇 Wins: {wins} | 🥈 Losses: {losses}
-
-─⊹⊱⋆⊰─
-
-📊 Win %: {win_pct:.2f}%
-⭐ Total Score: {total_score}
-🎯 Last Score: {last_score}
-🎲 Rounds: {rounds_played} | ☠️ Eliminations: {eliminations} | ⛔ Penalties: {penalties}
-
-─⊹⊱⋆⊰─
-
-✧ One match doesn’t define you — the comeback will! 🚀
-"""
-    await update.message.reply_text(msg, parse_mode="HTML")

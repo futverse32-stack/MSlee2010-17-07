@@ -1,23 +1,27 @@
-# helpers/leaderboard.py
 import math
 import html
 import asyncio
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+import sqlite3
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
 from telegram.ext import ContextTypes
 from config import DB_PATH
 from plugins.game.db import ensure_columns_exist
-import sqlite3
+from plugins.utils.thumbnail import generate_card, download_user_photo_by_id
 
 logger = logging.getLogger(__name__)
 
-def get_all_users_sorted():
+PER_PAGE = 5
+
+# ---------------- DB ----------------
+def get_all_users_sorted(limit: int = 100):
     try:
         ensure_columns_exist()
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT 
                 user_id, 
                 IFNULL(username, '') AS username, 
@@ -31,8 +35,10 @@ def get_all_users_sorted():
                 IFNULL(penalties, 0) AS penalties
             FROM users
             ORDER BY wins DESC, total_score DESC
-            LIMIT 100
-        """)
+            LIMIT ?
+            """,
+            (limit,),
+        )
         result = cursor.fetchall()
         conn.close()
         return result
@@ -45,20 +51,22 @@ def get_user_rank(user_id):
         all_users = get_all_users_sorted()
         for idx, row in enumerate(all_users, start=1):
             if row['user_id'] == user_id:
-                win_percent = round(row['wins'] / row['games_played'] * 100, 1) if row['games_played'] > 0 else 0
+                gp = row['games_played'] or 0
+                win_percent = round((row['wins'] or 0) / gp * 100, 1) if gp > 0 else 0
                 return {
-                    "username": row['username'] or row['first_name'] or "Unknown",
+                    "username": (row['username'] or row['first_name'] or "Unknown"),
                     "rank": idx,
                     "total_users": len(all_users),
-                    "total_played": row['games_played'],
-                    "wins": row['wins'],
-                    "losses": row['losses'],
+                    "total_played": gp,
+                    "wins": row['wins'] or 0,
+                    "losses": row['losses'] or 0,
                     "win_percent": win_percent,
-                    "rounds_played": row['rounds_played'],
-                    "eliminations": row['eliminations'],
-                    "total_score": row['total_score'],
-                    "penalties": row['penalties']
+                    "rounds_played": row['rounds_played'] or 0,
+                    "eliminations": row['eliminations'] or 0,
+                    "total_score": row['total_score'] or 0,
+                    "penalties": row['penalties'] or 0
                 }
+        # Not in list
         return {
             "username": "Unknown",
             "rank": len(all_users) + 1,
@@ -80,111 +88,146 @@ def get_user_rank(user_id):
             "eliminations": 0, "total_score": 0, "penalties": 0
         }
 
-async def generate_leaderboard_task(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
-    user_id = update.effective_user.id
-    all_users = get_all_users_sorted()
-    per_page = 5
-    total_pages = max(1, math.ceil(len(all_users) / per_page))
+# ---------------- UI helpers ----------------
+def _medal_for_rank(rank: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "")
+
+def _build_pager_old(page: int, total_pages: int) -> InlineKeyboardMarkup | None:
+    if total_pages <= 1:
+        return None
+    buttons = []
+    row = []
+    if page > 1:
+        row.append(InlineKeyboardButton("◄ Previous", callback_data=f"leaderboard_{page-1}"))
+    if page < total_pages:
+        row.append(InlineKeyboardButton("Next ►", callback_data=f"leaderboard_{page+1}"))
+    if row:
+        buttons.append(row)
+
+    row2 = [InlineKeyboardButton(f"Page {page}/{total_pages}", callback_data="lb:nop")]
+    buttons.append(row2)
+    return InlineKeyboardMarkup(buttons)
+
+def _build_leaderboard_text(all_users, page: int, per_page: int, viewer_id: int) -> str:
+    total = len(all_users)
+    total_pages = max(1, math.ceil(total / per_page))
     page = max(1, min(page, total_pages))
+    start_idx = (page - 1) * per_page
+    end_idx = min(start_idx + per_page, total)
+
     text = "<b>──✦ Player Spotlight ✦──</b>\n\n"
     user_in_page = False
-    user_stats = None
-
-    start_idx = (page - 1) * per_page
-    end_idx = min(start_idx + per_page, len(all_users))
 
     for i, row in enumerate(all_users[start_idx:end_idx], start=start_idx + 1):
-        games_played = row['games_played'] or 0
+        rank = i
+        medal = _medal_for_rank(rank)
+        gp = row['games_played'] or 0
         wins = row['wins'] or 0
         losses = row['losses'] or 0
         rounds_played = row['rounds_played'] or 0
         eliminations = row['eliminations'] or 0
         total_score = row['total_score'] or 0
         penalties = row['penalties'] or 0
-        win_percent = round(wins / games_played * 100, 1) if games_played > 0 else 0
-        display_name = html.escape(row['first_name'] or "Unknown")
-        highlight = "⭐ " if row['user_id'] == user_id else ""
-        text += "<b>────⊱◈◈◈⊰────</b>\n"
-        text += f"{i}. {highlight}{display_name}\n"
-        text += f"   ⧉ Win%: {win_percent} | 🎮 {games_played}\n"
-        text += f"   🏆 {wins} | {losses} Lost\n"
-        text += f"   🔄 Rounds: {rounds_played} | ☠️ Elim: {eliminations}\n"
+        win_percent = round(wins / gp * 100, 1) if gp > 0 else 0
+        display_name = html.escape(row['first_name'] or row['username'] or "Unknown")
+        highlight = "⭐ " if row['user_id'] == viewer_id else ""
+
+        text += f"{rank}. {medal} {highlight} <b>{display_name}</b> (ID: {row['user_id']})\n"
+        text += f"   🎮 Games: {gp} | ⧉ Win%: {win_percent}\n"
+        text += f"   🏆 Wins: {wins} | Lost: {losses}\n"
         text += f"   ⭐ Score: {total_score} | ⛔ Pen: {penalties}\n"
-        text += f"   ID: {row['user_id']}\n"
-        if row['user_id'] == user_id:
+        text += "<b>────⊱◈◈◈⊰────</b>\n\n"
+
+        if row['user_id'] == viewer_id:
             user_in_page = True
-            user_stats = {
-                "rank": i,
-                "username": display_name,
-                "total_played": games_played,
-                "wins": wins,
-                "losses": losses,
-                "win_percent": win_percent,
-                "rounds_played": rounds_played,
-                "eliminations": eliminations,
-                "total_score": total_score,
-                "penalties": penalties
-            }
 
     if not user_in_page:
-        user_stats = get_user_rank(user_id)
-        text += f"\n<b>────⊱◈◈◈⊰────</b>\n"
-        text += f"📌 Your Rank:\n"
-        text += f"{user_stats['rank']}. {html.escape(user_stats['username'])}\n"
-        text += f"   ⧉ Win%: {user_stats['win_percent']} | 🎮 {user_stats['total_played']}\n"
-        text += f"   🏆 {user_stats['wins']} | {user_stats['losses']} Lost\n"
-        text += f"   🔄 Rounds: {user_stats['rounds_played']} | ☠️ Elim: {user_stats['eliminations']}\n"
-        text += f"   ⭐ Score: {user_stats['total_score']} | ⛔ Pen: {user_stats['penalties']}\n"
-        text += f"   ID: {user_id}\n"
+        me = get_user_rank(viewer_id)
+        text += f"\n\n<b>────⊱◈◈◈⊰────</b>\n"
+        text += "📌 <b>Your Rank:</b>\n"
+        text += f"{me['rank']}. {html.escape(me['username'])} (ID: {viewer_id})\n"
+        text += f"   🎮 Games: {me['total_played']} | ⧉ Win%: {me['win_percent']}\n"
+        text += f"   🏆 Wins: {me['wins']} | Lost: {me['losses']}\n"
+        text += f"   ⭐ Score: {me['total_score']} | ⛔ Pen: {me['penalties']}\n"
 
-    text += f"<b>────⊱◈◈◈⊰────</b>\nPage {page}/{total_pages}"
+    return text, total_pages, page
 
-    keyboard = []
-    if total_pages > 1:
-        buttons = []
-        if page > 1:
-            buttons.append(InlineKeyboardButton("◄ Previous", callback_data=f"leaderboard_{page-1}"))
-        if page < total_pages:
-            buttons.append(InlineKeyboardButton("Next ►", callback_data=f"leaderboard_{page+1}"))
-        keyboard.append(buttons)
+# ---------------- Core flow ----------------
+async def _send_leaderboard_initial(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    viewer_id = update.effective_user.id
+    all_users = get_all_users_sorted()
+    text, total_pages, page = _build_leaderboard_text(all_users, page=1, per_page=PER_PAGE, viewer_id=viewer_id)
+    pager = _build_pager_old(page, total_pages)
 
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    image_url = "https://graph.org/file/ca04194ed4b8b48eafcab-ab92ca372392f43809.jpg"
+    top_user_id = all_users[0]['user_id'] if all_users else viewer_id
+    try:
+        usr_pfp_path = await download_user_photo_by_id(top_user_id, context.bot)
+    except Exception:
+        logger.exception("Failed to download top user's photo; using default card background.")
+        usr_pfp_path = None
 
     try:
-        if update.callback_query:
-            await update.callback_query.message.edit_media(
-                media=InputMediaPhoto(media=image_url, caption=text, parse_mode="HTML"),
-                reply_markup=reply_markup
-            )
-            await update.callback_query.answer()
-        else:
-            await update.message.reply_photo(photo=image_url, caption=text, reply_markup=reply_markup, parse_mode="HTML")
+        card = generate_card("leaderboard", usr_pfp_path)
+        await update.message.reply_photo(photo=card, caption=text, reply_markup=pager, parse_mode="HTML")
     except Exception:
-        logger.exception("Error in generate_leaderboard_task")
-        try:
-            if update.callback_query:
-                await update.callback_query.message.edit_text(text=f"⚠️ Failed to send leaderboard image, showing text instead.\n\n{text}", reply_markup=reply_markup, parse_mode="HTML")
-                await update.callback_query.answer()
-            else:
-                await update.message.reply_text(text=f"⚠️ Failed to send leaderboard image, showing text instead.\n\n{text}", reply_markup=reply_markup, parse_mode="HTML")
-        except Exception:
-            logger.exception("Fallback also failed for leaderboard")
+        logger.exception("generate_card/send failed; falling back to text.")
+        await update.message.reply_text(text=text, reply_markup=pager, parse_mode="HTML")
+
+
+async def _edit_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int):
+    query = update.callback_query
+    viewer_id = query.from_user.id
+    all_users = get_all_users_sorted()
+    text, total_pages, page = _build_leaderboard_text(all_users, page=page, per_page=PER_PAGE, viewer_id=viewer_id)
+    pager = _build_pager_old(page, total_pages)
+
+    try:
+        if query.message.photo:
+            await query.message.edit_caption(caption=text, reply_markup=pager, parse_mode="HTML")
+        else:
+            await query.message.edit_text(text=text, reply_markup=pager, parse_mode="HTML")
+        await query.answer()
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            try: await query.answer("No changes.")
+            except Exception: pass
+        else:
+            logger.exception("Error editing leaderboard caption; fallback to text.")
+            try:
+                await query.message.edit_text(
+                    text=f"⚠️ Failed to update caption, showing text instead.\n\n{text}",
+                    reply_markup=pager,
+                    parse_mode="HTML",
+                )
+                await query.answer()
+            except Exception:
+                logger.exception("Fallback also failed for leaderboard caption update.")
+
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    asyncio.create_task(generate_leaderboard_task(update, context, 1))
+    # No scheduler; just send once with image, then caption-only edits.
+    await _send_leaderboard_initial(update, context)
 
 async def leaderboard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.data and query.data.startswith('leaderboard_'):
-        try:
-            page = int(query.data.split('_')[1])
-            asyncio.create_task(generate_leaderboard_task(update, context, page))
-        except (IndexError, ValueError):
-            await query.answer()
+    data = (query.data or "").strip()
+    try:
+        if not data.startswith("leaderboard_"):
+            return await query.answer()
+        page = int(data.split("_", 1)[1])
+        await _edit_leaderboard_page(update, context, page)
+    except (IndexError, ValueError):
+        await query.answer()
 
 async def users_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+
+    if update.message and update.message.reply_to_message:
+        user: User = update.message.reply_to_message.from_user
+
+    else:
+        user: User = update.effective_user
+
+    user_id = user.id
     stats = get_user_rank(user_id)
     text = (
         f"🏆 𝐘𝐎𝐔𝐑 𝐑𝐀𝐍𝐊\n\n"
@@ -194,3 +237,81 @@ async def users_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "───────────────\n"
     )
     await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    mystic = await update.message.reply_text("🌸")
+
+    if update.message and update.message.reply_to_message:
+        user: User = update.message.reply_to_message.from_user
+
+    elif context.args:
+        arg = context.args[0]
+        print(arg)
+        try:
+            member = await context.bot.get_chat_member(update.effective_chat.id, arg)
+            user: User = member.user
+        except Exception as e:
+            print(e)
+            user: User = update.effective_user
+    else:
+        user: User = update.effective_user
+
+    stats = get_user_rank(user.id)
+    ensure_columns_exist()
+    import sqlite3
+    conn = sqlite3.connect(__import__("config").DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT first_name, username,
+               IFNULL(games_played,0),
+               IFNULL(wins,0),
+               IFNULL(losses,0),
+               IFNULL(rounds_played,0),
+               IFNULL(eliminations,0),
+               IFNULL(total_score,0),
+               IFNULL(last_score,0),
+               IFNULL(penalties,0)
+        FROM users
+        WHERE user_id = ?
+    """, (user.id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        await update.message.reply_text("❌ No stats found. Play a game first!")
+        return
+    first_name, username, games_played, wins, losses, rounds_played, eliminations, total_score, last_score, penalties = row
+    win_pct = (wins / games_played * 100) if games_played else 0
+    display_name = f"@{username}" if username else first_name
+    msg = f"""
+╭━━━ ⟢ 𝗣𝗹𝗮𝘆𝗲𝗿 𝗦𝘁𝗮𝘁𝘀 ⟢ ━━━╮
+┃ 👤 𝗡𝗮𝗺𝗲: <b>{first_name}</b>
+╰━━━━━━━━━━━━━━━━━━━╯
+🏆 𝐑𝐚𝐧𝐤: {stats['rank']}
+🎮 <b>Games Played:</b> {games_played}
+🥇 <b>Wins:</b> {wins} | <b>Losses:</b> {losses}
+━━━━━━━━━━━━━━━━━━━━━
+📊 <b>Win %:</b> {win_pct:.2f}%
+⭐ <b>Total Score:</b> {total_score}
+🎯 <b>Last Score:</b> {last_score}
+
+☠️ <b>Eliminations:</b> {eliminations}
+⛔ <b>Penalties:</b> {penalties}
+━━━━━━━━━━━━━━━━━━━━━
+💡 <i>One match doesn’t define you — the comeback will! 🚀</i>
+"""
+
+    try:
+        usr_pfp_path = await download_user_photo_by_id(user.id, context.bot)
+    except Exception:
+        logger.exception("Failed to download top user's photo; using default card background.")
+        usr_pfp_path = None
+
+    await mystic.delete()
+    try:
+        card = generate_card("userinfo", usr_pfp_path)
+        await update.message.reply_photo(photo=card, caption=msg, parse_mode="HTML")
+    except Exception:
+        logger.exception("generate_card/send failed; falling back to text.")
+        await update.message.reply_text(text=msg, parse_mode="HTML")
