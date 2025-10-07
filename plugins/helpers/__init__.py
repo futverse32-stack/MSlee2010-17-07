@@ -3,7 +3,7 @@ from plugins.helpers.start import start, bot_added
 from plugins.helpers.gstats import gstats, gstats_callback
 from plugins.helpers.stats import stats, stats_callback, getid_command
 from plugins.helpers.guide import guide_command, guide_callback
-from plugins.helpers.broadcast import broadcast_command, backup_command, restore_command
+from plugins.helpers.broadcast import broadcast_command
 from plugins.helpers.leaderboard import leaderboard_command, leaderboard_callback, users_rank as users_rank_command, userinfo
 from plugins.helpers.moderators import register_mods_handlers
 from plugins.helpers.backup import auto_backup_job, restore_command, backup_command, bugs

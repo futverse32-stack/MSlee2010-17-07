@@ -1,6 +1,7 @@
 import os
 import shutil
 import logging
+import glob, re
 from datetime import datetime, timedelta
 from telegram import Update, InputFile
 from telegram.ext import ContextTypes, CommandHandler
@@ -41,17 +42,23 @@ async def _create_backup_file(prefix: str) -> str:
 
 async def _send_backup_to_owner(context: ContextTypes.DEFAULT_TYPE, file_path: str, caption: str | None = None):
     with open(file_path, "rb") as f:
-        await context.bot.send_document(
+        m = await context.bot.send_document(
             chat_id=OWNER_ID,
             document=InputFile(f, filename=os.path.basename(file_path)),
             caption=caption or ""
         )
-        await context.bot.send_document(
-            chat_id=LOG_CHAT_ID,
-            document=InputFile(f, filename=os.path.basename(file_path)),
-            caption=caption or ""
-        )
+        await m.forward(LOG_CHAT_ID)
 
+def prune_auto_backups(keep: int = 1):
+    pattern = os.path.join(BACKUP_FOLDER, "auto_backup_*.db")
+    files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    to_delete = files[keep:]
+    for path in to_delete:
+        try:
+            if re.search(r"auto_backup_\d{8}_\d{6}\.db$", os.path.basename(path)):
+                os.remove(path)
+        except Exception as e:
+            logger.warning(f"Failed to delete old auto backup {path}: {e}")
 
 # ---------- Commands ----------
 @mod_or_owner
@@ -114,7 +121,7 @@ async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=LOG_CHAT_ID, text=f"❌ Auto backup failed: {e}")
         except Exception:
             pass
-
+    prune_auto_backups(keep=1)
 
 # -------------------- BUG REPORT COMMAND --------------------
 
