@@ -2,7 +2,7 @@
 import sqlite3
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
-from config import DB_PATH, OWNER_ID, LOG_CHAT_ID  # LOG_CHAT_ID may be None if not set
+from config import DB_PATH, OWNER_ID, LOG_CHAT_ID
 import logging
 
 logger = logging.getLogger(__name__)

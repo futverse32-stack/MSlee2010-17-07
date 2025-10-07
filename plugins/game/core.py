@@ -174,7 +174,7 @@ async def start_round(context: ContextTypes.DEFAULT_TYPE, group_id: int):
 
         # ---------------- Inactivity Penalty Logic ----------------
         if getattr(p, "timeout_count", 0) == 0:
-            p.score -= 1
+            p.score -= 2
             p.total_penalties += 1
             p.timeout_count = 1
             p.current_number = "Skipped"

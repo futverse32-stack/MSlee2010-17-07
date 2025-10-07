@@ -13,13 +13,13 @@ def game_handlers(app):
     ensure_gstats_tables()
 
 
-    app.add_handler(CommandHandler("startgame", startgame))
-    app.add_handler(CommandHandler("join", join))
-    app.add_handler(CommandHandler("leave", leave))
-    app.add_handler(CommandHandler("extend", extend))
-    app.add_handler(CommandHandler("players", players))
-    app.add_handler(CommandHandler("endgame", endmatch))
-    app.add_handler(CommandHandler("forcestart", forcestart))
+    app.add_handler(CommandHandler("startgame", startgame, filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("join", join, filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("leave", leave, filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("extend", extend, filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("players", players, filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("endgame", endmatch, filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("forcestart", forcestart, filters.ChatType.GROUPS))
 
     app.add_handler(CallbackQueryHandler(confirm_endmatch, pattern=r"^confirm_endmatch:-?\d+$"))
     app.add_handler(CallbackQueryHandler(mode_selection, pattern=r"^(start_solo|start_team):-?\d+$"))

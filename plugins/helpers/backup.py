@@ -1,10 +1,10 @@
-# plugins/backup.py
 import os
 import shutil
 import logging
 from datetime import datetime, timedelta
 from telegram import Update, InputFile
 from telegram.ext import ContextTypes, CommandHandler
+from plugins.utils.decorators import owner_only, mod_or_owner
 
 from config import DB_PATH, OWNER_ID, BACKUP_FOLDER, LOG_CHAT_ID
 
@@ -46,14 +46,16 @@ async def _send_backup_to_owner(context: ContextTypes.DEFAULT_TYPE, file_path: s
             document=InputFile(f, filename=os.path.basename(file_path)),
             caption=caption or ""
         )
+        await context.bot.send_document(
+            chat_id=LOG_CHAT_ID,
+            document=InputFile(f, filename=os.path.basename(file_path)),
+            caption=caption or ""
+        )
 
 
 # ---------- Commands ----------
+@mod_or_owner
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
-        return
 
     try:
         await update.message.reply_text("💾 Preparing database backup...")
@@ -64,12 +66,8 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Backup failed")
         await update.message.reply_text(f"❌ Failed to create/send backup: {e}")
 
-
+@mod_or_owner
 async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
-        return
 
     reply = update.message.reply_to_message
     if not reply or not reply.document:
@@ -88,14 +86,12 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp_restore_path = os.path.join(BACKUP_FOLDER, f"restore_{file.file_name}")
         await tg_file.download_to_drive(temp_restore_path)
 
-        # Optional: keep a safety backup of current DB before overwriting
         try:
             safety_path = await _create_backup_file("pre_restore_backup")
             logger.info(f"Pre-restore safety backup: {safety_path}")
         except Exception as e:
             logger.warning(f"Could not create pre-restore backup: {e}")
 
-        # Overwrite current database
         shutil.copyfile(temp_restore_path, DB_PATH)
 
         await update.message.reply_text("✅ Database restored successfully!")
@@ -114,9 +110,8 @@ async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
         await _send_backup_to_owner(context, path, caption="💾 Auto backup (every 12 hours)")
     except Exception as e:
         logger.exception("Auto backup failed")
-        # Best-effort notify owner
         try:
-            await context.bot.send_message(chat_id=OWNER_ID, text=f"❌ Auto backup failed: {e}")
+            await context.bot.send_message(chat_id=LOG_CHAT_ID, text=f"❌ Auto backup failed: {e}")
         except Exception:
             pass
 

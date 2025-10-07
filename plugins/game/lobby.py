@@ -5,6 +5,7 @@ from plugins.game.core import MindScaleGame, active_games, user_active_game, sta
 from plugins.game.db import ensure_user_exists, ensure_group_exists, ensure_columns_exist, update_user_after_game
 from config import JOIN_TIME_SEC, MIN_PLAYERS, MAX_PLAYERS
 from plugins.helpers.leaderboard import get_user_rank
+from plugins.utils.decorators import admin_only, mod_or_owner
 from plugins.helpers.notify import notify_on_new_game
 import logging, time
 
@@ -129,7 +130,7 @@ async def end_join_phase(context: ContextTypes.DEFAULT_TYPE, group_id: int):
         game.players = {p.user_id: p for p in joined_players}
         for p in removed_players:
             try:
-                await context.bot.send_message(chat_id=p.user_id, text="⚠️ Sorry! The match can only have 7 players. You won't be playing this round.")
+                await context.bot.send_message(chat_id=p.user_id, text=f"⚠️ Sorry! The match can only have {MAX_PLAYERS} players. You won't be playing this round.")
             except:
                 pass
 
@@ -292,22 +293,9 @@ async def players(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = InlineKeyboardMarkup([[InlineKeyboardButton("💠 Support", url="https://t.me/MindScale17")]])
     await update.message.reply_photo(photo="https://graph.org/file/79186f4d926011e1fb8e8-a9c682050a7a3539ed.jpg", caption=text, parse_mode="HTML", reply_markup=buttons)
 
+@admin_only
 async def endmatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    user = update.effective_user
-    if chat.type == 'private':
-        await update.message.reply_text(" ⚠️ 𝗘𝗻𝗱 𝗠𝗮𝘁𝗰𝗵\n\n❌ Use this command in the group only.")
-        return
-
-    try:
-        member = await context.bot.get_chat_member(chat.id, user.id)
-    except:
-        await update.message.reply_text(" ⚠️ 𝗘𝗻𝗱 𝗠𝗮𝘁𝗰𝗵 \n\n❌ Could not verify admin status.")
-        return
-
-    if member.status not in ["administrator", "creator"]:
-        await update.message.reply_text(" ⚠️ 𝗘𝗻𝗱 𝗠𝗮𝘁𝗰𝗵\n\n❌ Only group admins can end the match.")
-        return
 
     buttons = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Confirm End Match", callback_data=f"confirm_endmatch:{chat.id}")]])
     await update.message.reply_text(" ⚠️ 𝗘𝗻𝗱 𝗠𝗮𝘁𝗰𝗵 \n\n⚠️ Are you sure you want to end the current game?", reply_markup=buttons)
@@ -361,31 +349,12 @@ async def confirm_endmatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     del active_games[group_id]
     await query.edit_message_text(f" ✅ 𝗚𝗮𝗺𝗲 𝗘𝗻𝗱𝗲𝗱 \n\n☑️ Game ended by admin {user.first_name}.\n⏳ All timers cleared.")
 
+@admin_only
 async def forcestart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
 
-    if chat.type == 'private':
-        await update.message.reply_text(
-            "⚠️ 𝗙𝗼𝗿𝗰𝗲 𝗦𝘁𝗮𝗿𝘁\n\n❌ Use this command in the group only."
-        )
-        return
-
     group_id = chat.id
-
-    # Admin check
-    try:
-        member = await context.bot.get_chat_member(group_id, user.id)
-        if member.status not in ["administrator", "creator"]:
-            await update.message.reply_text(
-                "⚠️ 𝗙𝗼𝗿𝗰𝗲 𝗦𝘁𝗮𝗿𝘁\n\n❌ Only group admins can use this command."
-            )
-            return
-    except:
-        await update.message.reply_text(
-            "⚠️ 𝗙𝗼𝗿𝗰𝗲 𝗦𝘁𝗮𝗿𝘁\n\n❌ Could not verify admin status."
-        )
-        return
 
     # Check if a game exists
     if group_id not in active_games:

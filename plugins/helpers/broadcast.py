@@ -7,6 +7,7 @@ from telegram import Message, Update, InputFile
 from telegram.ext import ContextTypes
 from config import DB_PATH, OWNER_ID, BACKUP_FOLDER
 from plugins.connections.logger import setup_logger
+from plugins.utils.decorators import mod_or_owner
 
 logger = setup_logger(__name__)
 os.makedirs(BACKUP_FOLDER, exist_ok=True)
@@ -63,13 +64,10 @@ async def broadcast_task(bot, reply: Message, groups: list, users: list, owner_i
     except Exception as e:
         logger.error("Failed to send broadcast completion message to owner: %s", e)
 
-
+@mod_or_owner
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Broadcast a replied message to all users and groups (OWNER ONLY)."""
     user = update.effective_user
-    if user.id != OWNER_ID:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
-        return
 
     reply: Message = update.message.reply_to_message
     if not reply:
@@ -95,51 +93,3 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Failed to start broadcast task: %s", e)
         await update.message.reply_text("❌ Failed to start broadcast. Try again later.")
 
-
-# ---------------- Backup & Restore ----------------
-async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
-        return
-
-    try:
-        await update.message.reply_text("💾 Preparing database backup...")
-        backup_path = os.path.join(BACKUP_FOLDER, f"db_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.db")
-        shutil.copyfile(DB_PATH, backup_path)
-
-        with open(backup_path, "rb") as f:
-            await context.bot.send_document(chat_id=OWNER_ID, document=InputFile(f, filename=os.path.basename(backup_path)))
-
-        await update.message.reply_text("✅ Backup sent to your DM!")
-    except Exception as e:
-        logger.exception("Failed to create/send backup: %s", e)
-        await update.message.reply_text(f"❌ Failed to create/send backup: {e}")
-
-
-async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
-        return
-
-    reply = update.message.reply_to_message
-    if not reply or not reply.document:
-        await update.message.reply_text("❌ Reply to a backup `.db` file to restore.")
-        return
-
-    file = reply.document
-    if not file.file_name.endswith(".db"):
-        await update.message.reply_text("❌ This is not a valid database file.")
-        return
-
-    try:
-        await update.message.reply_text("💾 Downloading backup file...")
-        file_obj = await file.get_file()
-        file_path = os.path.join(BACKUP_FOLDER, f"restore_{file.file_name}")
-        await file_obj.download_to_drive(file_path)
-
-        # Overwrite current database
-        shutil.copyfile(file_path, DB_PATH)
-        await update.message.reply_text("✅ Database restored successfully!")
-    except Exception as e:
-        logger.exception("Failed to restore DB: %s", e)
-        await update.message.reply_text(f"❌ Failed to restore database: {e}")
